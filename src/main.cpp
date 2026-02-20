@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_INA219.h>
+#include "version.h"
+
 
 // ===============================
 // PIN DEFINITIONS
@@ -400,6 +402,7 @@ void StopPump()
 
   CurrentPage = MAINPAGE;
   NxGotoPage(PAGE_MAIN);
+  NxSetText("tVersion", FW_VERSION);
 
   NxSetVal(SLIDER_FILL, 0);
   NxSetVal(SLIDER_DRAIN, 0);
@@ -770,6 +773,16 @@ void ProcessNextion()
 // ===============================
 void setup()
 {
+  Serial.begin(115200);
+  delay(200);
+
+  Serial.print("\nFuel Pump Controller ");
+  Serial.print(FW_VERSION);
+  Serial.print(" | Built ");
+  Serial.print(FW_BUILD_DATE);
+  Serial.print(" ");
+  Serial.println(FW_BUILD_TIME);
+
   pinMode(FILL_RELAY, OUTPUT);
   pinMode(DRAIN_RELAY, OUTPUT);
   digitalWrite(FILL_RELAY, LOW);
@@ -804,6 +817,7 @@ void setup()
   lowBatteryLatched = false;
   CurrentPage = MAINPAGE;
   NxGotoPage(PAGE_MAIN);
+  NxSetText("tVersion", FW_VERSION);
 
   NxSetVal(NX_VOLUME_MAIN_OBJ, 0);
 
