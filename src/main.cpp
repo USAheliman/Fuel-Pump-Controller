@@ -39,7 +39,9 @@
 #define PAGE_MAIN     "MainPage"
 #define PAGE_FILL     "FillPage"
 #define PAGE_DRAIN    "DrainPage"
-#define PAGE_LOWBATT  "LowBattPage"
+// NOTE: Page name must match the HMI exactly.
+// User HMI page: "LowBatPage" (single 't').
+#define PAGE_LOWBATT  "LowBatPage"
 
 #define SLIDER_FILL  "PumpSpeedFill"
 #define SLIDER_DRAIN "PumpSpeedDrain"
@@ -65,7 +67,7 @@
 #define NX_CUR_BAR_OBJ   "CurBar"
 #define NX_CUR_TXT_OBJ   "CurTxt"
 
-// Low battery page objects (Text components) on LowBattPage
+// Low battery page objects (Text components) on LowBatPage
 #define NX_LB_PACKV_TXT   "LbPackV"
 #define NX_LB_CELLV_TXT   "LbCellV"
 #define NX_LB_CELLS_TXT   "LbCells"
@@ -80,6 +82,18 @@
 
 uint8_t CurrentPage = MAINPAGE;
 bool PumpEnabled = false;
+
+// Nextion can change pages without telling the MCU (e.g. via Hotspot "page X").
+// Support explicit page-report codes from the HMI so the MCU knows what is visible.
+// In each page's **Preinitialize Event**, send 4 raw bytes little-endian:
+//   MainPage   -> printh 89130000   (5001)
+//   FillPage   -> printh 8A130000   (5002)
+//   DrainPage  -> printh 8B130000   (5003)
+//   LowBatPage -> printh 8C130000   (5004)
+#define NX_PAGE_REPORT_MAIN   5001
+#define NX_PAGE_REPORT_FILL   5002
+#define NX_PAGE_REPORT_DRAIN  5003
+#define NX_PAGE_REPORT_LOWBAT 5004
 
 // Last session volumes (for main page)
 int lastFillVolumeMl  = 0;
@@ -135,7 +149,9 @@ bool lowBatteryLatched = false;
 // VOLTAGE SAG FILTER SETTINGS
 // ===============================
 #define SAG_FILTER_ALPHA  0.20f
-#define SAG_TRIP_COUNT    4
+// How many consecutive 500ms samples must be below cutoff before tripping.
+// 2 samples = ~1s, enough to ignore brief spikes but still stop quickly.
+#define SAG_TRIP_COUNT    2
 #define SAG_HYST_PER_CELL 0.05f
 
 static float filteredPackV = 0.0f;
@@ -369,15 +385,16 @@ void EnterLowBatteryPage(float packV, float vPerCell)
 
   char buf[32];
 
-  snprintf(buf, sizeof(buf), "Pack: %.2f V", (double)packV);
+  // Populate LowBatPage fields (as requested: raw values + cell count)
+  snprintf(buf, sizeof(buf), "Pack voltage : %.2fV", (double)packV);
   NxSetText(NX_LB_PACKV_TXT, buf);
 
-  snprintf(buf, sizeof(buf), "Cell: %.2f V", (double)vPerCell);
+  snprintf(buf, sizeof(buf), "Cell voltage : %.2fV", (double)vPerCell);
   NxSetText(NX_LB_CELLV_TXT, buf);
 
-  if (cellCount == 2) NxSetText(NX_LB_CELLS_TXT, "Cells: 2S");
-  else if (cellCount == 3) NxSetText(NX_LB_CELLS_TXT, "Cells: 3S");
-  else NxSetText(NX_LB_CELLS_TXT, "Cells: ?");
+  if (cellCount == 2) NxSetText(NX_LB_CELLS_TXT, "2 cell");
+  else if (cellCount == 3) NxSetText(NX_LB_CELLS_TXT, "3 cell");
+  else NxSetText(NX_LB_CELLS_TXT, "?");
 
   NxSetVal(SLIDER_FILL, 0);
   NxSetVal(SLIDER_DRAIN, 0);
@@ -632,15 +649,23 @@ static void UpdatePowerUIAndSafety()
   float vPerCell_raw = (cellCount > 0) ? (packV_raw / (float)cellCount) : packV_raw;
   float vPerCell_f   = (cellCount > 0) ? (filteredPackV / (float)cellCount) : filteredPackV;
 
-  if (lowBatteryLatched && CurrentPage == LOWBATTPAGE)
+  // If LowBatPage is currently visible (either due to a real low-battery trip
+  // or because the user navigated there via a Hotspot), keep the values live.
+  if (CurrentPage == LOWBATTPAGE)
   {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "Pack: %.2f V", (double)packV_raw);
+    char buf[40];
+    snprintf(buf, sizeof(buf), "Pack voltage : %.2fV", (double)packV_raw);
     NxSetText(NX_LB_PACKV_TXT, buf);
 
-    snprintf(buf, sizeof(buf), "Cell: %.2f V", (double)vPerCell_raw);
+    snprintf(buf, sizeof(buf), "Cell voltage : %.2fV", (double)vPerCell_raw);
     NxSetText(NX_LB_CELLV_TXT, buf);
-    return;
+
+    if (cellCount == 2) NxSetText(NX_LB_CELLS_TXT, "2 cell");
+    else if (cellCount == 3) NxSetText(NX_LB_CELLS_TXT, "3 cell");
+    else NxSetText(NX_LB_CELLS_TXT, "?");
+
+    // When low battery has latched, we don't want any other page logic.
+    if (lowBatteryLatched) return;
   }
 
   if (CurrentPage != LOWBATTPAGE)
@@ -666,11 +691,13 @@ static void UpdatePowerUIAndSafety()
     float cutoffCell = CUTOFF_V_PER_CELL;
     float hystCell   = SAG_HYST_PER_CELL;
 
-    if (vPerCell_f <= cutoffCell)
+    // Trip based on *raw per-cell* (what the pack is actually doing right now),
+    // but require a couple of consecutive low samples to avoid false trips.
+    if (vPerCell_raw <= cutoffCell)
     {
       if (lowCount < 255) lowCount++;
     }
-    else if (vPerCell_f >= (cutoffCell + hystCell))
+    else if (vPerCell_raw >= (cutoffCell + hystCell))
     {
       lowCount = 0;
     }
@@ -719,6 +746,13 @@ void ProcessNextion()
 
   while (ReadU32(v))
   {
+    // Page-report codes from HMI (page Preinitialize events).
+    // This keeps MCU state in sync when the user navigates via Hotspots.
+    if (v == NX_PAGE_REPORT_MAIN)  { CurrentPage = MAINPAGE;    continue; }
+    if (v == NX_PAGE_REPORT_FILL)  { CurrentPage = FILLPAGE;    continue; }
+    if (v == NX_PAGE_REPORT_DRAIN) { CurrentPage = DRAINPAGE;   continue; }
+    if (v == NX_PAGE_REPORT_LOWBAT){ CurrentPage = LOWBATTPAGE; continue; }
+
     if (waitingForTargetFill)
     {
       waitingForTargetFill = false;
