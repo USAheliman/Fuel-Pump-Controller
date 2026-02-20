@@ -789,7 +789,6 @@ void setup()
   digitalWrite(DRAIN_RELAY, LOW);
 
   pinMode(TANK_FULL_PIN, INPUT_PULLUP);
-
   pinMode(PUMP_REN, OUTPUT);
   pinMode(PUMP_LEN, OUTPUT);
   pinMode(PUMP_RPWM, OUTPUT);
