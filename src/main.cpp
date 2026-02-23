@@ -72,6 +72,9 @@
 #define NX_LB_CELLV_TXT   "LbCellV"
 #define NX_LB_CELLS_TXT   "LbCells"
 
+// Fill stop reason text object on FillPage
+#define NX_STOP_REASON_OBJ "StopReason"
+
 // ===============================
 // STATE
 // ===============================
@@ -388,6 +391,21 @@ static void DetectCellCount(float packV)
 }
 
 // ===============================
+// PUMP STOP HELPER (stays on current page)
+// Used for auto-stops so user can read the stop reason message
+// ===============================
+static void StopPumpInPlace()
+{
+  PumpEnabled = false;
+  SetTargetSpeed(0);
+  SetPumpOutput(0);
+  currentSpeedSigned = 0;
+  PumpDriverDisable();
+  digitalWrite(FILL_RELAY, LOW);
+  digitalWrite(DRAIN_RELAY, LOW);
+}
+
+// ===============================
 // LOW BATTERY LATCH ACTION
 // ===============================
 void EnterLowBatteryPage(float packV, float vPerCell)
@@ -477,6 +495,7 @@ void EnterFillPage()
   NxSetVal(NX_PROGRESS_FILL_OBJ, 0);
   NxSetText(NX_PERCENT_FILL_OBJ, "0%");
   NxSetVal(SLIDER_FILL, 0);
+  NxSetText(NX_STOP_REASON_OBJ, "");  // Clear stop reason on entry
 }
 
 void EnterDrainPage()
@@ -540,7 +559,6 @@ void BeginDrain(int pwm)
 
 // ===============================
 // FLOW + VOLUME DISPLAY + AUTO-STOP + PROGRESS
-// (rewritten to avoid timing/static issues + no early returns)
 // ===============================
 static void UpdateFillUiAndStops(uint32_t now)
 {
@@ -604,17 +622,19 @@ static void UpdateFillUiAndStops(uint32_t now)
     NxSetText(NX_PERCENT_FILL_OBJ, pctStr);
   }
 
-  // Auto-stops
+  // Auto-stops — stay on fill page so user can read the stop reason
   if (PumpEnabled)
   {
     if (targetFillMl > 0 && lastFillVolumeMl >= targetFillMl)
     {
-      StopPump();
+      NxSetText(NX_STOP_REASON_OBJ, "Stopped: Target volume reached");
+      StopPumpInPlace();
       return;
     }
     if (IsTankFull())
     {
-      StopPump();
+      NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank full sensor");
+      StopPumpInPlace();
       return;
     }
   }
@@ -708,8 +728,7 @@ static void UpdatePowerUIAndSafety()
   float vPerCell_raw = (cellCount > 0) ? (packV_raw / (float)cellCount) : packV_raw;
   float vPerCell_f   = (cellCount > 0) ? (filteredPackV / (float)cellCount) : filteredPackV;
 
-  // If LowBatPage is currently visible (either due to a real low-battery trip
-  // or because the user navigated there via a Hotspot), keep the values live.
+  // If LowBatPage is currently visible keep the values live.
   if (CurrentPage == LOWBATTPAGE)
   {
     char buf[40];
@@ -750,8 +769,6 @@ static void UpdatePowerUIAndSafety()
     float cutoffCell = CUTOFF_V_PER_CELL;
     float hystCell   = SAG_HYST_PER_CELL;
 
-    // Trip based on *raw per-cell* (what the pack is actually doing right now),
-    // but require a couple of consecutive low samples to avoid false trips.
     if (vPerCell_raw <= cutoffCell)
     {
       if (lowCount < 255) lowCount++;
