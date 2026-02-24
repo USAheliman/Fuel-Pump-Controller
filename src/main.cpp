@@ -1,8 +1,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_INA219.h>
+#include <SD.h>
 #include "version.h"
-
 
 // ===============================
 // PIN DEFINITIONS
@@ -21,11 +21,16 @@
 // ===============================
 // PUMP DRIVER (BTS7960)
 // ===============================
-// RPWM/LPWM must be PWM-capable pins.
 #define PUMP_RPWM 7     // forward PWM
-#define PUMP_LPWM 10    // reverse PWM (extra PWM pin)
+#define PUMP_LPWM 10    // reverse PWM
 #define PUMP_REN  8     // enable
 #define PUMP_LEN  9     // enable
+
+// ===============================
+// SD CARD
+// ===============================
+#define SD_CS_PIN BUILTIN_SDCARD   // Teensy 4.1 built-in SD slot
+#define CONFIG_FILE "/models.cfg"
 
 // ===============================
 // NEXTION
@@ -34,76 +39,115 @@
 #define NEXTION_BAUD 921600
 
 // ===============================
-// PAGE NAMES (MUST match HMI exactly, no spaces)
+// PAGE NAMES (MUST match HMI exactly)
 // ===============================
 #define PAGE_MAIN     "MainPage"
 #define PAGE_FILL     "FillPage"
 #define PAGE_DRAIN    "DrainPage"
-// NOTE: Page name must match the HMI exactly.
-// User HMI page: "LowBatPage" (single 't').
 #define PAGE_LOWBATT  "LowBatPage"
+#define PAGE_SETUP    "SetupPage"
 
-#define SLIDER_FILL  "PumpSpeedFill"
-#define SLIDER_DRAIN "PumpSpeedDrain"
+#define SLIDER_FILL   "PumpSpeedFill"
+#define SLIDER_DRAIN  "PumpSpeedDrain"
 
-// Fill page display objects (Number/Text components)
-#define NX_FLOW_RATE_FILL_OBJ "FlowFill"
-#define NX_VOLUME_FILL_OBJ    "VolFill"
-#define NX_TARGET_FILL_OBJ    "TgtFill"
-#define NX_PROGRESS_FILL_OBJ  "ProgFill"
-#define NX_PERCENT_FILL_OBJ   "PctFill"
+// Fill page display objects
+#define NX_FLOW_RATE_FILL_OBJ  "FlowFill"
+#define NX_VOLUME_FILL_OBJ     "VolFill"
+#define NX_TARGET_FILL_OBJ     "TgtFill"
+#define NX_PROGRESS_FILL_OBJ   "ProgFill"
+#define NX_PERCENT_FILL_OBJ    "PctFill"
+#define NX_STOP_REASON_OBJ     "StopReason"
 
-// Drain page display objects (Number components)
+// Drain page display objects
 #define NX_FLOW_RATE_DRAIN_OBJ "FlowDrain"
 #define NX_VOLUME_DRAIN_OBJ    "VolDrain"
 #define NX_TARGET_DRAIN_OBJ    "TgtDrain"
 
-// Main page display object (Number component)
+// Main page display objects
 #define NX_VOLUME_MAIN_OBJ     "VolMain"
+#define NX_ACTIVE_MODEL_OBJ    "tActiveModel"
 
-// Battery / Current UI objects (MUST exist on Main/Fill/Drain pages)
+// Battery / Current UI objects
 #define NX_BATT_BAR_OBJ  "BatBar"
 #define NX_BATT_PCT_OBJ  "BatPct"
 #define NX_CUR_BAR_OBJ   "CurBar"
 #define NX_CUR_TXT_OBJ   "CurTxt"
 
-// Low battery page objects (Text components) on LowBatPage
-#define NX_LB_PACKV_TXT   "LbPackV"
-#define NX_LB_CELLV_TXT   "LbCellV"
-#define NX_LB_CELLS_TXT   "LbCells"
+// Low battery page objects
+#define NX_LB_PACKV_TXT  "LbPackV"
+#define NX_LB_CELLV_TXT  "LbCellV"
+#define NX_LB_CELLS_TXT  "LbCells"
 
-// Fill stop reason text object on FillPage
-#define NX_STOP_REASON_OBJ "StopReason"
+// Setup page objects
+#define NX_S_NAME      "sName"
+#define NX_S_PIC       "sPic"
+#define NX_S_TANK_VOL  "sTankVol"
+#define NX_S_SENSOR    "sSensor"
+#define NX_S_PUMP_SPD  "sPumpSpd"
 
 // ===============================
-// STATE
+// PAGE STATE
 // ===============================
 #define MAINPAGE    0
 #define FILLPAGE    1
 #define DRAINPAGE   2
 #define LOWBATTPAGE 3
+#define SETUPPAGE   4
 
 uint8_t CurrentPage = MAINPAGE;
 bool PumpEnabled = false;
 
-// Nextion can change pages without telling the MCU (e.g. via Hotspot "page X").
-// Support explicit page-report codes from the HMI so the MCU knows what is visible.
-// Use `print 5001..5004` before `page ...` in Touch Release Events.
+// Page report codes
 #define NX_PAGE_REPORT_MAIN   5001
 #define NX_PAGE_REPORT_FILL   5002
 #define NX_PAGE_REPORT_DRAIN  5003
 #define NX_PAGE_REPORT_LOWBAT 5004
 
-// Last session volumes (for main page)
-int lastFillVolumeMl  = 0;
-int lastDrainVolumeMl = 0;
-
-// Target volumes (mL). 0 = disabled.
-int targetFillMl  = 0;
-int targetDrainMl = 0;
+// Setup page command codes
+#define NX_CMD_SETUP_PAGE 4000
+#define NX_CMD_MODEL1     4001
+#define NX_CMD_MODEL2     4002
+#define NX_CMD_MODEL3     4003
+#define NX_CMD_MODEL4     4004
+#define NX_CMD_SELECT     4010
+#define NX_CMD_SAVE       4011
+#define NX_CMD_BACK_SETUP 4020
 
 // ===============================
-// MINIMUM SPEED FLOOR (kept from your L298N tuning)
+// MODEL CONFIGURATION
+// ===============================
+#define NUM_MODELS 4
+
+struct ModelConfig
+{
+  char    name[24];       // Model name
+  int     tankVolumeMl;   // Tank volume in mL
+  bool    hasTankSensor;  // Has tank full sensor
+  int     pumpSpeed;      // Pump speed 0-255
+  uint8_t picIndex;       // Nextion image index
+};
+
+// Default model configurations
+ModelConfig models[NUM_MODELS] = {
+  { "BO 105",   2000, true,  127, 5 },
+  { "Whiplash", 1000, false, 127, 7 },
+  { "Alouette", 1500, true,  127, 4 },
+  { "EC 145",   3000, true,  127, 6 },
+};
+
+int activeModelIndex  = 0;  // Model selected for filling
+int previewModelIndex = 0;  // Model being previewed on setup page
+
+// ===============================
+// SESSION STATE
+// ===============================
+int lastFillVolumeMl  = 0;
+int lastDrainVolumeMl = 0;
+int targetFillMl      = 0;
+int targetDrainMl     = 0;
+
+// ===============================
+// MINIMUM SPEED FLOOR
 // ===============================
 #define MIN_PWM 140
 #define MAX_PWM 255
@@ -125,12 +169,12 @@ int currentSpeedSigned = 0;
 int targetSpeedSigned  = 0;
 
 // ===============================
-// FLOW SENSOR CALIBRATION (SEN-HZ06K)
+// FLOW SENSOR CALIBRATION
 // ===============================
-#define HZ_PER_LPM 57.0f
-#define PULSES_PER_LITER 1696.0f   // calibrate if needed
+#define HZ_PER_LPM       57.0f
+#define PULSES_PER_LITER 1696.0f
 
-volatile uint32_t fillPulses = 0;
+volatile uint32_t fillPulses  = 0;
 volatile uint32_t drainPulses = 0;
 
 // ===============================
@@ -141,35 +185,30 @@ Adafruit_INA219 ina219;
 #define CUTOFF_V_PER_CELL 3.82f
 #define MAX_CURRENT_A     5.0f
 
-int cellCount = 0;
+int  cellCount         = 0;
 bool lowBatteryLatched = false;
 
 // ===============================
-// VOLTAGE SAG FILTER SETTINGS
+// VOLTAGE SAG FILTER
 // ===============================
 #define SAG_FILTER_ALPHA  0.20f
-// How many consecutive 500ms samples must be below cutoff before tripping.
-// 2 samples = ~1s, enough to ignore brief spikes but still stop quickly.
 #define SAG_TRIP_COUNT    2
 #define SAG_HYST_PER_CELL 0.05f
 
-static float filteredPackV = 0.0f;
-static bool  filterInit = false;
-static uint8_t lowCount = 0;
+static float   filteredPackV = 0.0f;
+static bool    filterInit    = false;
+static uint8_t lowCount      = 0;
 
 // ===============================
-// FLOW UI STATE (clean + deterministic)
+// FLOW UI STATE
 // ===============================
 struct FlowUiState
 {
-  uint32_t lastMs = 0;
+  uint32_t lastMs     = 0;
   uint32_t lastPulses = 0;
-
-  int lastSentFlow = -1;
-  int lastSentVol  = -1;
-
-  // Fill-only
-  int lastSentPct  = -1;
+  int lastSentFlow    = -1;
+  int lastSentVol     = -1;
+  int lastSentPct     = -1;
 };
 
 static FlowUiState gFillUi;
@@ -177,15 +216,15 @@ static FlowUiState gDrainUi;
 
 static inline void ResetFlowUi(FlowUiState &s)
 {
-  s.lastMs = 0;
-  s.lastPulses = 0;
+  s.lastMs       = 0;
+  s.lastPulses   = 0;
   s.lastSentFlow = -1;
   s.lastSentVol  = -1;
   s.lastSentPct  = -1;
 }
 
 // ===============================
-// FORWARD DECLARATIONS (needed in .cpp)
+// FORWARD DECLARATIONS
 // ===============================
 static void UpdatePowerUIAndSafety();
 void ProcessNextion();
@@ -195,11 +234,17 @@ void UpdateRamp();
 void StopPump();
 void EnterFillPage();
 void EnterDrainPage();
+void EnterSetupPage();
 void BeginFill(int pwm);
 void BeginDrain(int pwm);
 void EnterLowBatteryPage(float packV, float vPerCell);
 void UpdateFlowDisplaysAutoStopAndProgress();
 void InitFlowSensors();
+void SaveModelsToSD();
+void LoadModelsFromSD();
+void ShowModelOnSetupPanel(int idx);
+void ApplyActiveModel();
+void UpdateMainPageModel();
 
 // ===============================
 // NEXTION TX HELPERS
@@ -238,23 +283,29 @@ static void NxSetText(const char* objName, const char* txt)
   NxCmd(buf);
 }
 
+static void NxSetPic(const char* objName, int picIndex)
+{
+  char buf[72];
+  snprintf(buf, sizeof(buf), "%s.pic=%d", objName, picIndex);
+  NxCmd(buf);
+}
+
 // ===============================
 // FLOW ISRs
 // ===============================
-void FillFlowISR()  { fillPulses++; }
+void FillFlowISR()  { fillPulses++;  }
 void DrainFlowISR() { drainPulses++; }
 
 void InitFlowSensors()
 {
   pinMode(FILL_FLOW_PIN, INPUT_PULLUP);
   pinMode(DRAIN_FLOW_PIN, INPUT_PULLUP);
-
   attachInterrupt(digitalPinToInterrupt(FILL_FLOW_PIN),  FillFlowISR,  RISING);
   attachInterrupt(digitalPinToInterrupt(DRAIN_FLOW_PIN), DrainFlowISR, RISING);
 }
 
 // ===============================
-// PUMP DRIVER ENABLE/DISABLE (failsafe)
+// PUMP DRIVER
 // ===============================
 static inline void PumpDriverEnable()
 {
@@ -264,16 +315,12 @@ static inline void PumpDriverEnable()
 
 static inline void PumpDriverDisable()
 {
-  // Ensure outputs are off before disabling
   analogWrite(PUMP_RPWM, 0);
   analogWrite(PUMP_LPWM, 0);
   digitalWrite(PUMP_REN, LOW);
   digitalWrite(PUMP_LEN, LOW);
 }
 
-// ===============================
-// PUMP OUTPUT (raw set, no ramp)
-// ===============================
 void SetPumpOutput(int signedSpeed)
 {
   signedSpeed = constrain(signedSpeed, -255, 255);
@@ -296,7 +343,6 @@ void SetPumpOutput(int signedSpeed)
   }
 }
 
-// Target speed setter
 void SetTargetSpeed(int signedSpeed)
 {
   targetSpeedSigned = constrain(signedSpeed, -255, 255);
@@ -311,14 +357,12 @@ void UpdateRamp()
 
   int desired = PumpEnabled ? targetSpeedSigned : 0;
 
-  // Prevent instant direction flip; ramp down to 0 first
   if ((currentSpeedSigned > 0 && desired < 0) || (currentSpeedSigned < 0 && desired > 0))
     desired = 0;
 
   if (currentSpeedSigned == desired) return;
 
   int diff = desired - currentSpeedSigned;
-
   if (diff > 0) currentSpeedSigned += min(RAMP_STEP, diff);
   else          currentSpeedSigned -= min(RAMP_STEP, -diff);
 
@@ -328,23 +372,15 @@ void UpdateRamp()
 // ===============================
 // HELPERS
 // ===============================
-
-// Tank full sensor read (with simple debounce using consecutive samples)
 static bool IsTankFull()
 {
   int raw = digitalRead(TANK_FULL_PIN);
   bool active = (TANK_FULL_ACTIVE_HIGH ? (raw == HIGH) : (raw == LOW));
 
-  // Debounce: require 2 consecutive "active" samples (Fill updates run ~500ms)
   static uint8_t activeCount = 0;
-  if (active)
-  {
-    if (activeCount < 255) activeCount++;
-  }
-  else
-  {
-    activeCount = 0;
-  }
+  if (active) { if (activeCount < 255) activeCount++; }
+  else          activeCount = 0;
+
   return (activeCount >= 2);
 }
 
@@ -357,20 +393,20 @@ static int LiPoPctFromV(float vPerCell)
     3.87f, 3.85f, 3.84f, 3.82f, 3.80f, 3.78f, 3.75f, 3.73f, 3.70f
   };
   static const int P[] = {
-    100,   95,    90,    85,    80,    75,    70,    60,
-    50,    45,    40,    30,    20,    15,    10,     5,     0
+    100, 95, 90, 85, 80, 75, 70, 60,
+     50, 45, 40, 30, 20, 15, 10,  5,  0
   };
   const int N = (int)(sizeof(P) / sizeof(P[0]));
 
-  if (vPerCell >= V[0]) return 100;
-  if (vPerCell <= V[N - 1]) return 0;
+  if (vPerCell >= V[0])   return 100;
+  if (vPerCell <= V[N-1]) return 0;
 
   for (int i = 0; i < N - 1; i++)
   {
-    if (vPerCell <= V[i] && vPerCell >= V[i + 1])
+    if (vPerCell <= V[i] && vPerCell >= V[i+1])
     {
-      float t = (vPerCell - V[i + 1]) / (V[i] - V[i + 1]);
-      float pct = (float)P[i + 1] + t * (float)(P[i] - P[i + 1]);
+      float t   = (vPerCell - V[i+1]) / (V[i] - V[i+1]);
+      float pct = (float)P[i+1] + t * (float)(P[i] - P[i+1]);
       return ClampPct((int)(pct + 0.5f));
     }
   }
@@ -391,8 +427,130 @@ static void DetectCellCount(float packV)
 }
 
 // ===============================
-// PUMP STOP HELPER (stays on current page)
-// Used for auto-stops so user can read the stop reason message
+// SD CARD — SAVE / LOAD
+// ===============================
+void SaveModelsToSD()
+{
+  if (!SD.begin(SD_CS_PIN))
+  {
+    Serial.println("SD: save failed - card not found");
+    return;
+  }
+
+  SD.remove(CONFIG_FILE);
+  File f = SD.open(CONFIG_FILE, FILE_WRITE);
+  if (!f)
+  {
+    Serial.println("SD: could not open file for writing");
+    return;
+  }
+
+  f.println(activeModelIndex);
+
+  for (int i = 0; i < NUM_MODELS; i++)
+  {
+    f.print(models[i].name);              f.print(',');
+    f.print(models[i].tankVolumeMl);      f.print(',');
+    f.print(models[i].hasTankSensor ? 1 : 0); f.print(',');
+    f.print(models[i].pumpSpeed);         f.print(',');
+    f.println(models[i].picIndex);
+  }
+
+  f.close();
+  Serial.println("SD: models saved");
+}
+
+void LoadModelsFromSD()
+{
+  if (!SD.begin(SD_CS_PIN))
+  {
+    Serial.println("SD: load failed - using defaults");
+    return;
+  }
+
+  if (!SD.exists(CONFIG_FILE))
+  {
+    Serial.println("SD: no config file - using defaults");
+    return;
+  }
+
+  File f = SD.open(CONFIG_FILE, FILE_READ);
+  if (!f)
+  {
+    Serial.println("SD: could not open config - using defaults");
+    return;
+  }
+
+  String line = f.readStringUntil('\n');
+  activeModelIndex = constrain(line.toInt(), 0, NUM_MODELS - 1);
+
+  for (int i = 0; i < NUM_MODELS; i++)
+  {
+    line = f.readStringUntil('\n');
+    line.trim();
+
+    int c1 = line.indexOf(',');
+    int c2 = line.indexOf(',', c1 + 1);
+    int c3 = line.indexOf(',', c2 + 1);
+    int c4 = line.indexOf(',', c3 + 1);
+
+    if (c1 < 0 || c2 < 0 || c3 < 0 || c4 < 0) continue;
+
+    String name = line.substring(0, c1);
+    name.toCharArray(models[i].name, sizeof(models[i].name));
+    models[i].tankVolumeMl  = line.substring(c1+1, c2).toInt();
+    models[i].hasTankSensor = line.substring(c2+1, c3).toInt() == 1;
+    models[i].pumpSpeed     = line.substring(c3+1, c4).toInt();
+    models[i].picIndex      = (uint8_t)line.substring(c4+1).toInt();
+  }
+
+  f.close();
+  Serial.println("SD: models loaded");
+}
+
+// ===============================
+// APPLY ACTIVE MODEL
+// ===============================
+void ApplyActiveModel()
+{
+  targetFillMl = models[activeModelIndex].tankVolumeMl;
+  Serial.print("Active model: ");
+  Serial.println(models[activeModelIndex].name);
+}
+
+// ===============================
+// UPDATE MAIN PAGE MODEL NAME
+// ===============================
+void UpdateMainPageModel()
+{
+  NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+}
+
+// ===============================
+// SETUP PAGE — SHOW MODEL IN PANEL
+// ===============================
+void ShowModelOnSetupPanel(int idx)
+{
+  if (idx < 0 || idx >= NUM_MODELS) return;
+  previewModelIndex = idx;
+
+  ModelConfig &m = models[idx];
+
+  // Debug — show exactly what we're sending
+  Serial.print("Setting sPic.pic=");
+  Serial.println(m.picIndex);
+
+  NxSetPic(NX_S_PIC,      m.picIndex);   // pic first
+  delay(50);                             // give Nextion time to load the image
+  NxSetText(NX_S_NAME,    m.name);
+  NxSetVal(NX_S_TANK_VOL, m.tankVolumeMl);
+  NxSetText(NX_S_SENSOR,  m.hasTankSensor ? "YES" : "NO");
+  NxSetVal(NX_S_PUMP_SPD, m.pumpSpeed);
+}
+
+// ===============================
+// PUMP STOP IN PLACE (stays on current page)
 // ===============================
 static void StopPumpInPlace()
 {
@@ -406,7 +564,7 @@ static void StopPumpInPlace()
 }
 
 // ===============================
-// LOW BATTERY LATCH ACTION
+// LOW BATTERY LATCH
 // ===============================
 void EnterLowBatteryPage(float packV, float vPerCell)
 {
@@ -425,19 +583,17 @@ void EnterLowBatteryPage(float packV, float vPerCell)
   NxGotoPage(PAGE_LOWBATT);
 
   char buf[32];
-
-  // Populate LowBatPage fields (as requested: raw values + cell count)
   snprintf(buf, sizeof(buf), "Pack voltage : %.2fV", (double)packV);
   NxSetText(NX_LB_PACKV_TXT, buf);
 
   snprintf(buf, sizeof(buf), "Cell voltage : %.2fV", (double)vPerCell);
   NxSetText(NX_LB_CELLV_TXT, buf);
 
-  if (cellCount == 2) NxSetText(NX_LB_CELLS_TXT, "2 cell");
+  if (cellCount == 2)      NxSetText(NX_LB_CELLS_TXT, "2 cell");
   else if (cellCount == 3) NxSetText(NX_LB_CELLS_TXT, "3 cell");
-  else NxSetText(NX_LB_CELLS_TXT, "?");
+  else                     NxSetText(NX_LB_CELLS_TXT, "?");
 
-  NxSetVal(SLIDER_FILL, 0);
+  NxSetVal(SLIDER_FILL,  0);
   NxSetVal(SLIDER_DRAIN, 0);
 }
 
@@ -450,7 +606,6 @@ void StopPump()
 
   PumpEnabled = false;
   SetTargetSpeed(0);
-
   SetPumpOutput(0);
   currentSpeedSigned = 0;
   PumpDriverDisable();
@@ -461,15 +616,15 @@ void StopPump()
   CurrentPage = MAINPAGE;
   NxGotoPage(PAGE_MAIN);
   NxSetText("tVersion", FW_VERSION);
-  NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery"); //
+  NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
+  UpdateMainPageModel();
 
-  NxSetVal(SLIDER_FILL, 0);
+  NxSetVal(SLIDER_FILL,  0);
   NxSetVal(SLIDER_DRAIN, 0);
 
   int showVol = 0;
   if (wasPage == FILLPAGE)  showVol = lastFillVolumeMl;
   if (wasPage == DRAINPAGE) showVol = lastDrainVolumeMl;
-
   NxSetVal(NX_VOLUME_MAIN_OBJ, showVol);
 }
 
@@ -478,7 +633,6 @@ void EnterFillPage()
   noInterrupts(); fillPulses = 0; interrupts();
   lastFillVolumeMl = 0;
 
-  // Ensure page starts at 0 and updates deterministically
   ResetFlowUi(gFillUi);
 
   PumpEnabled = false;
@@ -487,16 +641,18 @@ void EnterFillPage()
   digitalWrite(FILL_RELAY, LOW);
   digitalWrite(DRAIN_RELAY, LOW);
 
+  ApplyActiveModel();
+
   CurrentPage = FILLPAGE;
   NxGotoPage(PAGE_FILL);
 
-  NxSetVal(NX_TARGET_FILL_OBJ, targetFillMl);
+  NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
   NxSetVal(NX_FLOW_RATE_FILL_OBJ, 0);
-  NxSetVal(NX_VOLUME_FILL_OBJ, 0);
-  NxSetVal(NX_PROGRESS_FILL_OBJ, 0);
-  NxSetText(NX_PERCENT_FILL_OBJ, "0%");
-  NxSetVal(SLIDER_FILL, 0);
-  NxSetText(NX_STOP_REASON_OBJ, "");  // Clear stop reason on entry
+  NxSetVal(NX_VOLUME_FILL_OBJ,    0);
+  NxSetVal(NX_PROGRESS_FILL_OBJ,  0);
+  NxSetText(NX_PERCENT_FILL_OBJ,  "0%");
+  NxSetVal(SLIDER_FILL,            models[activeModelIndex].pumpSpeed);
+  NxSetText(NX_STOP_REASON_OBJ,   "");
 }
 
 void EnterDrainPage()
@@ -515,21 +671,32 @@ void EnterDrainPage()
   CurrentPage = DRAINPAGE;
   NxGotoPage(PAGE_DRAIN);
 
-  NxSetVal(NX_TARGET_DRAIN_OBJ, targetDrainMl);
+  NxSetVal(NX_TARGET_DRAIN_OBJ,    targetDrainMl);
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
-  NxSetVal(NX_VOLUME_DRAIN_OBJ, 0);
-  NxSetVal(SLIDER_DRAIN, 0);
+  NxSetVal(NX_VOLUME_DRAIN_OBJ,    0);
+  NxSetVal(SLIDER_DRAIN,            models[activeModelIndex].pumpSpeed);
+}
+
+void EnterSetupPage()
+{
+  CurrentPage = SETUPPAGE;
+  NxGotoPage(PAGE_SETUP);
+  ShowModelOnSetupPanel(activeModelIndex);  // Show currently active model first
 }
 
 void BeginFill(int pwm)
 {
   if (lowBatteryLatched) return;
 
-  // If tank is already full, refuse to run
-  if (IsTankFull()) { StopPump(); return; }
+  if (models[activeModelIndex].hasTankSensor && IsTankFull())
+  {
+    StopPump();
+    return;
+  }
 
   pwm = constrain(pwm, 0, 255);
-  if (pwm == 0) pwm = MIN_PWM;
+  if (pwm == 0) pwm = models[activeModelIndex].pumpSpeed;
+  if (pwm < MIN_PWM) pwm = MIN_PWM;
 
   PumpDriverEnable();
   PumpEnabled = true;
@@ -546,7 +713,8 @@ void BeginDrain(int pwm)
   if (lowBatteryLatched) return;
 
   pwm = constrain(pwm, 0, 255);
-  if (pwm == 0) pwm = MIN_PWM;
+  if (pwm == 0) pwm = models[activeModelIndex].pumpSpeed;
+  if (pwm < MIN_PWM) pwm = MIN_PWM;
 
   PumpDriverEnable();
   PumpEnabled = true;
@@ -559,7 +727,7 @@ void BeginDrain(int pwm)
 }
 
 // ===============================
-// FLOW + VOLUME DISPLAY + AUTO-STOP + PROGRESS
+// FLOW + VOLUME + AUTO-STOP
 // ===============================
 static void UpdateFillUiAndStops(uint32_t now)
 {
@@ -569,11 +737,10 @@ static void UpdateFillUiAndStops(uint32_t now)
   uint32_t p = fillPulses;
   interrupts();
 
-  // Force an immediate update after entering page
   if (gFillUi.lastMs == 0)
   {
-    gFillUi.lastMs = now - 500;
-    gFillUi.lastPulses = 0; // we reset pulses on entry
+    gFillUi.lastMs     = now - 500;
+    gFillUi.lastPulses = 0;
   }
 
   if (now - gFillUi.lastMs < 500) return;
@@ -584,13 +751,12 @@ static void UpdateFillUiAndStops(uint32_t now)
   uint32_t dp = p - gFillUi.lastPulses;
   gFillUi.lastPulses = p;
 
-  float hz = (dt > 0.0f) ? ((float)dp / dt) : 0.0f;
-  float q_lpm = hz / HZ_PER_LPM;
-
+  float hz        = (dt > 0.0f) ? ((float)dp / dt) : 0.0f;
+  float q_lpm     = hz / HZ_PER_LPM;
   int flow_ml_min = (int)(q_lpm * 1000.0f + 0.5f);
 
-  float liters = (float)p / PULSES_PER_LITER;
-  int volume_ml = (int)(liters * 1000.0f + 0.5f);
+  float liters    = (float)p / PULSES_PER_LITER;
+  int volume_ml   = (int)(liters * 1000.0f + 0.5f);
 
   lastFillVolumeMl = volume_ml;
 
@@ -617,13 +783,12 @@ static void UpdateFillUiAndStops(uint32_t now)
   {
     gFillUi.lastSentPct = pct;
     NxSetVal(NX_PROGRESS_FILL_OBJ, pct);
-
     char pctStr[10];
     snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
     NxSetText(NX_PERCENT_FILL_OBJ, pctStr);
   }
 
-  // Auto-stops — stay on fill page so user can read the stop reason
+  // Auto-stops — stay on fill page so user can read the reason
   if (PumpEnabled)
   {
     if (targetFillMl > 0 && lastFillVolumeMl >= targetFillMl)
@@ -632,7 +797,7 @@ static void UpdateFillUiAndStops(uint32_t now)
       StopPumpInPlace();
       return;
     }
-    if (IsTankFull())
+    if (models[activeModelIndex].hasTankSensor && IsTankFull())
     {
       NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank full sensor");
       StopPumpInPlace();
@@ -651,8 +816,8 @@ static void UpdateDrainUiAndStops(uint32_t now)
 
   if (gDrainUi.lastMs == 0)
   {
-    gDrainUi.lastMs = now - 500;
-    gDrainUi.lastPulses = 0; // we reset pulses on entry
+    gDrainUi.lastMs     = now - 500;
+    gDrainUi.lastPulses = 0;
   }
 
   if (now - gDrainUi.lastMs < 500) return;
@@ -663,13 +828,12 @@ static void UpdateDrainUiAndStops(uint32_t now)
   uint32_t dp = p - gDrainUi.lastPulses;
   gDrainUi.lastPulses = p;
 
-  float hz = (dt > 0.0f) ? ((float)dp / dt) : 0.0f;
-  float q_lpm = hz / HZ_PER_LPM;
-
+  float hz        = (dt > 0.0f) ? ((float)dp / dt) : 0.0f;
+  float q_lpm     = hz / HZ_PER_LPM;
   int flow_ml_min = (int)(q_lpm * 1000.0f + 0.5f);
 
-  float liters = (float)p / PULSES_PER_LITER;
-  int volume_ml = (int)(liters * 1000.0f + 0.5f);
+  float liters    = (float)p / PULSES_PER_LITER;
+  int volume_ml   = (int)(liters * 1000.0f + 0.5f);
 
   lastDrainVolumeMl = volume_ml;
 
@@ -700,7 +864,7 @@ void UpdateFlowDisplaysAutoStopAndProgress()
 }
 
 // ===============================
-// POWER UI + CUTOFF (with sag filter)
+// POWER UI + CUTOFF
 // ===============================
 static void UpdatePowerUIAndSafety()
 {
@@ -709,33 +873,22 @@ static void UpdatePowerUIAndSafety()
   if (now - lastMs < 500) return;
   lastMs = now;
 
-  float busV = ina219.getBusVoltage_V();
-  float shuntmV = ina219.getShuntVoltage_mV();
+  float busV      = ina219.getBusVoltage_V();
+  float shuntmV   = ina219.getShuntVoltage_mV();
   float packV_raw = busV + (shuntmV / 1000.0f);
-  float currentA = fabs(ina219.getCurrent_mA() / 1000.0f);
+  float currentA  = fabs(ina219.getCurrent_mA() / 1000.0f);
 
-  if (!filterInit)
-  {
-    filteredPackV = packV_raw;
-    filterInit = true;
-  }
-  else
-  {
-    filteredPackV = filteredPackV + SAG_FILTER_ALPHA * (packV_raw - filteredPackV);
-  }
+  if (!filterInit) { filteredPackV = packV_raw; filterInit = true; }
+  else filteredPackV = filteredPackV + SAG_FILTER_ALPHA * (packV_raw - filteredPackV);
 
   DetectCellCount(filteredPackV);
 
-  // Update battery type on main, drain and fill pages as soon as cell count is known
   if (cellCount > 0)
-  {
     NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
-  }
 
-  float vPerCell_raw = (cellCount > 0) ? (packV_raw / (float)cellCount) : packV_raw;
+  float vPerCell_raw = (cellCount > 0) ? (packV_raw     / (float)cellCount) : packV_raw;
   float vPerCell_f   = (cellCount > 0) ? (filteredPackV / (float)cellCount) : filteredPackV;
 
-  // If LowBatPage is currently visible keep the values live.
   if (CurrentPage == LOWBATTPAGE)
   {
     char buf[40];
@@ -745,11 +898,10 @@ static void UpdatePowerUIAndSafety()
     snprintf(buf, sizeof(buf), "Cell voltage : %.2fV", (double)vPerCell_raw);
     NxSetText(NX_LB_CELLV_TXT, buf);
 
-    if (cellCount == 2) NxSetText(NX_LB_CELLS_TXT, "2 cell");
+    if (cellCount == 2)      NxSetText(NX_LB_CELLS_TXT, "2 cell");
     else if (cellCount == 3) NxSetText(NX_LB_CELLS_TXT, "3 cell");
-    else NxSetText(NX_LB_CELLS_TXT, "?");
+    else                     NxSetText(NX_LB_CELLS_TXT, "?");
 
-    // When low battery has latched, we don't want any other page logic.
     if (lowBatteryLatched) return;
   }
 
@@ -759,13 +911,11 @@ static void UpdatePowerUIAndSafety()
     int curPct  = CurrentToPct(currentA);
 
     NxSetVal(NX_BATT_BAR_OBJ, battPct);
-
     char btxt[12];
     snprintf(btxt, sizeof(btxt), "%d%%", battPct);
     NxSetText(NX_BATT_PCT_OBJ, btxt);
 
     NxSetVal(NX_CUR_BAR_OBJ, curPct);
-
     char ctxt[16];
     snprintf(ctxt, sizeof(ctxt), "%.1fA", (double)currentA);
     NxSetText(NX_CUR_TXT_OBJ, ctxt);
@@ -773,42 +923,27 @@ static void UpdatePowerUIAndSafety()
 
   if (!lowBatteryLatched && cellCount > 0)
   {
-    float cutoffCell = CUTOFF_V_PER_CELL;
-    float hystCell   = SAG_HYST_PER_CELL;
-
-    if (vPerCell_raw <= cutoffCell)
-    {
-      if (lowCount < 255) lowCount++;
-    }
-    else if (vPerCell_raw >= (cutoffCell + hystCell))
-    {
+    if (vPerCell_raw <= CUTOFF_V_PER_CELL)
+      { if (lowCount < 255) lowCount++; }
+    else if (vPerCell_raw >= (CUTOFF_V_PER_CELL + SAG_HYST_PER_CELL))
       lowCount = 0;
-    }
 
     if (lowCount >= SAG_TRIP_COUNT)
-    {
       EnterLowBatteryPage(packV_raw, vPerCell_raw);
-    }
   }
 }
 
 // ===============================
-// NEXTION RX (numeric protocol)
+// NEXTION RX
 // ===============================
 static bool ReadU32(uint32_t &out)
 {
   if (NEXTION.available() < 4) return false;
-
   uint8_t b0 = NEXTION.read();
   uint8_t b1 = NEXTION.read();
   uint8_t b2 = NEXTION.read();
   uint8_t b3 = NEXTION.read();
-
-  out = ((uint32_t)b0) |
-        ((uint32_t)b1 << 8) |
-        ((uint32_t)b2 << 16) |
-        ((uint32_t)b3 << 24);
-
+  out = ((uint32_t)b0) | ((uint32_t)b1 << 8) | ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24);
   return true;
 }
 
@@ -821,15 +956,15 @@ void ProcessNextion()
     return;
   }
 
-  static bool waitingForSpeed = false;
-  static bool waitingForTargetFill = false;
+  static bool waitingForSpeed       = false;
+  static bool waitingForTargetFill  = false;
   static bool waitingForTargetDrain = false;
 
   uint32_t v;
 
   while (ReadU32(v))
   {
-    // Page-report codes from HMI (use print 5001..5004 before page changes).
+    // Page report codes
     if (v == NX_PAGE_REPORT_MAIN)  { CurrentPage = MAINPAGE;    continue; }
     if (v == NX_PAGE_REPORT_FILL)  { CurrentPage = FILLPAGE;    continue; }
     if (v == NX_PAGE_REPORT_DRAIN) { CurrentPage = DRAINPAGE;   continue; }
@@ -839,10 +974,15 @@ void ProcessNextion()
     {
       waitingForTargetFill = false;
       targetFillMl = (int)constrain((int32_t)v, 0, 2000000);
-      if (CurrentPage == FILLPAGE) NxSetVal(NX_TARGET_FILL_OBJ, targetFillMl);
-      if (CurrentPage == FILLPAGE) { NxSetVal(NX_PROGRESS_FILL_OBJ, 0); NxSetText(NX_PERCENT_FILL_OBJ, "0%"); }
+      if (CurrentPage == FILLPAGE)
+      {
+        NxSetVal(NX_TARGET_FILL_OBJ,   targetFillMl);
+        NxSetVal(NX_PROGRESS_FILL_OBJ, 0);
+        NxSetText(NX_PERCENT_FILL_OBJ, "0%");
+      }
       continue;
     }
+
     if (waitingForTargetDrain)
     {
       waitingForTargetDrain = false;
@@ -854,22 +994,22 @@ void ProcessNextion()
     if (waitingForSpeed)
     {
       waitingForSpeed = false;
-
       int spd = ApplyMinimumFloor(v);
 
       if (CurrentPage == FILLPAGE)
       {
         if (!PumpEnabled && spd > 0) BeginFill(spd);
-        else if (PumpEnabled) SetTargetSpeed(+spd);
+        else if (PumpEnabled)        SetTargetSpeed(+spd);
       }
       else if (CurrentPage == DRAINPAGE)
       {
         if (!PumpEnabled && spd > 0) BeginDrain(spd);
-        else if (PumpEnabled) SetTargetSpeed(-spd);
+        else if (PumpEnabled)        SetTargetSpeed(-spd);
       }
       continue;
     }
 
+    // Standard commands
     if (v == 1) { EnterFillPage();  continue; }
     if (v == 2) { EnterDrainPage(); continue; }
     if (v == 3) { StopPump();       continue; }
@@ -877,10 +1017,47 @@ void ProcessNextion()
     if (v == 11) { if (CurrentPage == FILLPAGE)  BeginFill(MIN_PWM);  continue; }
     if (v == 12) { if (CurrentPage == DRAINPAGE) BeginDrain(MIN_PWM); continue; }
 
-    if (v == 1000) { waitingForSpeed = true; continue; }
-
-    if (v == 2000) { waitingForTargetFill = true; continue; }
+    if (v == 1000) { waitingForSpeed       = true; continue; }
+    if (v == 2000) { waitingForTargetFill  = true; continue; }
     if (v == 3000) { waitingForTargetDrain = true; continue; }
+
+    // Setup page commands
+    if (v == NX_CMD_SETUP_PAGE) { EnterSetupPage();          continue; }
+    if (v == NX_CMD_MODEL1)     { ShowModelOnSetupPanel(0);  continue; }
+    if (v == NX_CMD_MODEL2)     { ShowModelOnSetupPanel(1);  continue; }
+    if (v == NX_CMD_MODEL3)     { ShowModelOnSetupPanel(2);  continue; }
+    if (v == NX_CMD_MODEL4)     { ShowModelOnSetupPanel(3);  continue; }
+
+    if (v == NX_CMD_SELECT)
+    {
+      activeModelIndex = previewModelIndex;
+      ApplyActiveModel();
+      Serial.print("Selected: ");
+      Serial.println(models[activeModelIndex].name);
+      continue;
+    }
+
+    if (v == NX_CMD_SAVE)
+    {
+      SaveModelsToSD();
+      continue;
+    }
+
+     if (v == NX_CMD_BACK_SETUP)
+    {
+      // Auto select and save when leaving setup page
+      activeModelIndex = previewModelIndex;
+      ApplyActiveModel();
+      SaveModelsToSD();
+
+      CurrentPage = MAINPAGE;
+      NxGotoPage(PAGE_MAIN);
+      NxSetText("tVersion", FW_VERSION);
+      NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
+      UpdateMainPageModel();
+      continue;
+    }
+
   }
 }
 
@@ -914,17 +1091,19 @@ void setup()
   analogWriteFrequency(PUMP_RPWM, 2000);
   analogWriteFrequency(PUMP_LPWM, 2000);
 
-  // Default safe state
   PumpDriverDisable();
-
   InitFlowSensors();
 
   Wire.begin();
   ina219.begin();
 
+  // Load model configs from SD (uses defaults if no card/file found)
+  LoadModelsFromSD();
+  ApplyActiveModel();
+
   NEXTION.begin(NEXTION_BAUD);
 
-  PumpEnabled = false;
+  PumpEnabled        = false;
   currentSpeedSigned = 0;
   targetSpeedSigned  = 0;
   SetPumpOutput(0);
@@ -933,17 +1112,15 @@ void setup()
   CurrentPage = MAINPAGE;
   NxGotoPage(PAGE_MAIN);
   NxSetText("tVersion", FW_VERSION);
-  NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery"); //
-
+  UpdateMainPageModel();
 
   NxSetVal(NX_VOLUME_MAIN_OBJ, 0);
 
   ResetFlowUi(gFillUi);
   ResetFlowUi(gDrainUi);
 
-  // reset sag filter state
   filterInit = false;
-  lowCount = 0;
+  lowCount   = 0;
 
   StopPump();
 }
