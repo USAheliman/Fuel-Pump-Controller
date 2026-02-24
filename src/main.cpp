@@ -461,6 +461,7 @@ void StopPump()
   CurrentPage = MAINPAGE;
   NxGotoPage(PAGE_MAIN);
   NxSetText("tVersion", FW_VERSION);
+  NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery"); //
 
   NxSetVal(SLIDER_FILL, 0);
   NxSetVal(SLIDER_DRAIN, 0);
@@ -725,6 +726,12 @@ static void UpdatePowerUIAndSafety()
 
   DetectCellCount(filteredPackV);
 
+  // Update battery type on main, drain and fill pages as soon as cell count is known
+  if (cellCount > 0)
+  {
+    NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
+  }
+
   float vPerCell_raw = (cellCount > 0) ? (packV_raw / (float)cellCount) : packV_raw;
   float vPerCell_f   = (cellCount > 0) ? (filteredPackV / (float)cellCount) : filteredPackV;
 
@@ -926,6 +933,8 @@ void setup()
   CurrentPage = MAINPAGE;
   NxGotoPage(PAGE_MAIN);
   NxSetText("tVersion", FW_VERSION);
+  NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery"); //
+
 
   NxSetVal(NX_VOLUME_MAIN_OBJ, 0);
 
