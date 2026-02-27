@@ -537,16 +537,22 @@ void ShowModelOnSetupPanel(int idx)
 
   ModelConfig &m = models[idx];
 
-  // Debug — show exactly what we're sending
-  Serial.print("Setting sPic.pic=");
+  Serial.print("ShowModel idx=");
+  Serial.print(idx);
+  Serial.print(" name=");
+  Serial.print(m.name);
+  Serial.print(" vol=");
+  Serial.print(m.tankVolumeMl);
+  Serial.print(" spd=");
+  Serial.print(m.pumpSpeed);
+  Serial.print(" pic=");
   Serial.println(m.picIndex);
 
-  NxSetPic(NX_S_PIC,      m.picIndex);   // pic first
-  delay(50);                             // give Nextion time to load the image
   NxSetText(NX_S_NAME,    m.name);
   NxSetVal(NX_S_TANK_VOL, m.tankVolumeMl);
   NxSetText(NX_S_SENSOR,  m.hasTankSensor ? "YES" : "NO");
   NxSetVal(NX_S_PUMP_SPD, m.pumpSpeed);
+  NxSetPic(NX_S_PIC,      m.picIndex);
 }
 
 // ===============================
@@ -883,7 +889,7 @@ static void UpdatePowerUIAndSafety()
 
   DetectCellCount(filteredPackV);
 
-  if (cellCount > 0)
+  if (cellCount > 0 && CurrentPage != SETUPPAGE)
     NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
 
   float vPerCell_raw = (cellCount > 0) ? (packV_raw     / (float)cellCount) : packV_raw;
@@ -905,7 +911,7 @@ static void UpdatePowerUIAndSafety()
     if (lowBatteryLatched) return;
   }
 
-  if (CurrentPage != LOWBATTPAGE)
+  if (CurrentPage != LOWBATTPAGE && CurrentPage != SETUPPAGE)
   {
     int battPct = LiPoPctFromV(vPerCell_f);
     int curPct  = CurrentToPct(currentA);
@@ -959,6 +965,8 @@ void ProcessNextion()
   static bool waitingForSpeed       = false;
   static bool waitingForTargetFill  = false;
   static bool waitingForTargetDrain = false;
+  static bool waitingForTankVol = false;
+  static bool waitingForPumpSpd = false;
 
   uint32_t v;
 
@@ -1044,6 +1052,37 @@ void ProcessNextion()
     }
 
      if (v == NX_CMD_BACK_SETUP)
+
+    if (waitingForTankVol)
+    {
+      waitingForTankVol = false;
+      models[previewModelIndex].tankVolumeMl = (int)constrain((int32_t)v, 0, 9999);
+      CurrentPage = SETUPPAGE;
+      NxGotoPage(PAGE_SETUP);
+      ShowModelOnSetupPanel(previewModelIndex);
+      continue;
+    }
+
+    if (waitingForPumpSpd)
+    {
+      waitingForPumpSpd = false;
+      models[previewModelIndex].pumpSpeed = (int)constrain((int32_t)v, 0, 255);
+      CurrentPage = SETUPPAGE;
+      NxGotoPage(PAGE_SETUP);
+      ShowModelOnSetupPanel(previewModelIndex);
+      continue;
+    }
+
+    if (v == 6001) { waitingForTankVol = true;  continue; }
+    if (v == 6002) { waitingForPumpSpd = true;  continue; }
+    if (v == 6003)
+    {
+      // Toggle tank sensor for previewed model
+      models[previewModelIndex].hasTankSensor = !models[previewModelIndex].hasTankSensor;
+      NxSetText(NX_S_SENSOR, models[previewModelIndex].hasTankSensor ? "YES" : "NO");
+      continue;
+    }
+
     {
       // Auto select and save when leaving setup page
       activeModelIndex = previewModelIndex;
@@ -1122,7 +1161,6 @@ void setup()
   filterInit = false;
   lowCount   = 0;
 
-  StopPump();
 }
 
 void loop()
