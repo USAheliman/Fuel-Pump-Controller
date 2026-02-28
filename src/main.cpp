@@ -13,24 +13,23 @@
 #define FILL_FLOW_PIN  4
 #define DRAIN_FLOW_PIN 5
 
-// Tank full sensor (digital)
 #define TANK_FULL_PIN 6
-// Set to 1 if your sensor is active HIGH instead of active LOW
 #define TANK_FULL_ACTIVE_HIGH 1
 
 // ===============================
 // PUMP DRIVER (BTS7960)
 // ===============================
-#define PUMP_RPWM 7     // forward PWM
-#define PUMP_LPWM 10    // reverse PWM
-#define PUMP_REN  8     // enable
-#define PUMP_LEN  9     // enable
+#define PUMP_RPWM 7
+#define PUMP_LPWM 10
+#define PUMP_REN  8
+#define PUMP_LEN  9
 
 // ===============================
 // SD CARD
 // ===============================
-#define SD_CS_PIN BUILTIN_SDCARD   // Teensy 4.1 built-in SD slot
-#define CONFIG_FILE "/models.cfg"
+#define SD_CS_PIN    BUILTIN_SDCARD
+#define CONFIG_FILE  "/models.cfg"
+#define STATION_FILE "/station.cfg"
 
 // ===============================
 // NEXTION
@@ -39,51 +38,59 @@
 #define NEXTION_BAUD 921600
 
 // ===============================
-// PAGE NAMES (MUST match HMI exactly)
+// PAGE NAMES
 // ===============================
-#define PAGE_MAIN     "MainPage"
-#define PAGE_FILL     "FillPage"
-#define PAGE_DRAIN    "DrainPage"
-#define PAGE_LOWBATT  "LowBatPage"
-#define PAGE_SETUP    "SetupPage"
+#define PAGE_MAIN    "MainPage"
+#define PAGE_FILL    "FillPage"
+#define PAGE_DRAIN   "DrainPage"
+#define PAGE_LOWBATT "LowBatPage"
+#define PAGE_SETUP   "SetupPage"
 
-#define SLIDER_FILL   "PumpSpeedFill"
-#define SLIDER_DRAIN  "PumpSpeedDrain"
+#define SLIDER_FILL  "PumpSpeedFill"
+#define SLIDER_DRAIN "PumpSpeedDrain"
 
-// Fill page display objects
-#define NX_FLOW_RATE_FILL_OBJ  "FlowFill"
-#define NX_VOLUME_FILL_OBJ     "VolFill"
-#define NX_TARGET_FILL_OBJ     "TgtFill"
-#define NX_PROGRESS_FILL_OBJ   "ProgFill"
-#define NX_PERCENT_FILL_OBJ    "PctFill"
-#define NX_STOP_REASON_OBJ     "StopReason"
+// Fill page objects
+#define NX_FLOW_RATE_FILL_OBJ "FlowFill"
+#define NX_VOLUME_FILL_OBJ    "VolFill"
+#define NX_TARGET_FILL_OBJ    "TgtFill"
+#define NX_PROGRESS_FILL_OBJ  "ProgFill"
+#define NX_PERCENT_FILL_OBJ   "PctFill"
+#define NX_STOP_REASON_OBJ    "StopReason"
 
-// Drain page display objects
+// Drain page objects
 #define NX_FLOW_RATE_DRAIN_OBJ "FlowDrain"
 #define NX_VOLUME_DRAIN_OBJ    "VolDrain"
 #define NX_TARGET_DRAIN_OBJ    "TgtDrain"
 
-// Main page display objects
-#define NX_VOLUME_MAIN_OBJ     "VolMain"
-#define NX_ACTIVE_MODEL_OBJ    "tActiveModel"
+// Main page objects
+#define NX_VOLUME_MAIN_OBJ  "VolMain"
+#define NX_ACTIVE_MODEL_OBJ "tActiveModel"
 
 // Battery / Current UI objects
-#define NX_BATT_BAR_OBJ  "BatBar"
-#define NX_BATT_PCT_OBJ  "BatPct"
-#define NX_CUR_BAR_OBJ   "CurBar"
-#define NX_CUR_TXT_OBJ   "CurTxt"
+#define NX_BATT_BAR_OBJ "BatBar"
+#define NX_BATT_PCT_OBJ "BatPct"
+#define NX_CUR_BAR_OBJ  "CurBar"
+#define NX_CUR_TXT_OBJ  "CurTxt"
 
 // Low battery page objects
-#define NX_LB_PACKV_TXT  "LbPackV"
-#define NX_LB_CELLV_TXT  "LbCellV"
-#define NX_LB_CELLS_TXT  "LbCells"
+#define NX_LB_PACKV_TXT "LbPackV"
+#define NX_LB_CELLV_TXT "LbCellV"
+#define NX_LB_CELLS_TXT "LbCells"
 
 // Setup page objects
-#define NX_S_NAME      "sName"
-#define NX_S_PIC       "sPic"
-#define NX_S_TANK_VOL  "sTankVol"
-#define NX_S_SENSOR    "sSensor"
-#define NX_S_PUMP_SPD  "sPumpSpd"
+#define NX_S_NAME     "sName"
+#define NX_S_PIC      "sPic"
+#define NX_S_TANK_VOL "sTankVol"
+#define NX_S_SENSOR   "sSensor"
+#define NX_S_PUMP_SPD "sPumpSpd"
+
+// Heli and supply bar graph objects (Fill and Drain pages)
+#define NX_HELI_BAR_OBJ "ProgHeli"
+#define NX_HELI_PCT_OBJ "tHeliPct"
+#define NX_HELI_VOL_OBJ "tHeliVol"
+#define NX_SUP_BAR_OBJ  "ProgSup"
+#define NX_SUP_PCT_OBJ  "tSupPct"
+#define NX_SUP_VOL_OBJ  "tSupVol"
 
 // ===============================
 // PAGE STATE
@@ -97,7 +104,6 @@
 uint8_t CurrentPage = MAINPAGE;
 bool PumpEnabled = false;
 
-// Page report codes
 #define NX_PAGE_REPORT_MAIN   5001
 #define NX_PAGE_REPORT_FILL   5002
 #define NX_PAGE_REPORT_DRAIN  5003
@@ -120,14 +126,13 @@ bool PumpEnabled = false;
 
 struct ModelConfig
 {
-  char    name[24];       // Model name
-  int     tankVolumeMl;   // Tank volume in mL
-  bool    hasTankSensor;  // Has tank full sensor
-  int     pumpSpeed;      // Pump speed 0-255
-  uint8_t picIndex;       // Nextion image index
+  char    name[24];
+  int     tankVolumeMl;
+  bool    hasTankSensor;
+  int     pumpSpeed;
+  uint8_t picIndex;
 };
 
-// Default model configurations
 ModelConfig models[NUM_MODELS] = {
   { "BO 105",   2000, true,  127, 5 },
   { "Whiplash", 1000, false, 127, 7 },
@@ -135,8 +140,16 @@ ModelConfig models[NUM_MODELS] = {
   { "EC 145",   3000, true,  127, 6 },
 };
 
-int activeModelIndex  = 0;  // Model selected for filling
-int previewModelIndex = 0;  // Model being previewed on setup page
+int activeModelIndex  = 0;
+int previewModelIndex = 0;
+
+// ===============================
+// SUPPLY TANK
+// ===============================
+#define SUPPLY_TANK_DEFAULT_ML 20000
+
+int supplyTankCapacityMl  = SUPPLY_TANK_DEFAULT_ML;
+int supplyTankRemainingMl = SUPPLY_TANK_DEFAULT_ML;
 
 // ===============================
 // SESSION STATE
@@ -242,9 +255,12 @@ void UpdateFlowDisplaysAutoStopAndProgress();
 void InitFlowSensors();
 void SaveModelsToSD();
 void LoadModelsFromSD();
+void SaveStationToSD();
+void LoadStationFromSD();
 void ShowModelOnSetupPanel(int idx);
 void ApplyActiveModel();
 void UpdateMainPageModel();
+static void UpdateSupplyTankUI();
 
 // ===============================
 // NEXTION TX HELPERS
@@ -427,7 +443,34 @@ static void DetectCellCount(float packV)
 }
 
 // ===============================
-// SD CARD — SAVE / LOAD
+// SUPPLY TANK UI UPDATE
+// ===============================
+static void UpdateSupplyTankUI()
+{
+  supplyTankRemainingMl = constrain(supplyTankRemainingMl, 0, supplyTankCapacityMl);
+
+  int pct = 0;
+  if (supplyTankCapacityMl > 0)
+  {
+    pct = (int)((100.0f * (float)supplyTankRemainingMl) /
+          (float)supplyTankCapacityMl + 0.5f);
+    pct = constrain(pct, 0, 100);
+  }
+
+  NxSetVal(NX_SUP_BAR_OBJ, pct);
+
+  char pctStr[10];
+  snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+  NxSetText(NX_SUP_PCT_OBJ, pctStr);
+
+  char volStr[32];
+  snprintf(volStr, sizeof(volStr), "%d / %dml",
+           supplyTankRemainingMl, supplyTankCapacityMl);
+  NxSetText(NX_SUP_VOL_OBJ, volStr);
+}
+
+// ===============================
+// SD CARD — MODELS SAVE / LOAD
 // ===============================
 void SaveModelsToSD()
 {
@@ -449,10 +492,10 @@ void SaveModelsToSD()
 
   for (int i = 0; i < NUM_MODELS; i++)
   {
-    f.print(models[i].name);              f.print(',');
-    f.print(models[i].tankVolumeMl);      f.print(',');
-    f.print(models[i].hasTankSensor ? 1 : 0); f.print(',');
-    f.print(models[i].pumpSpeed);         f.print(',');
+    f.print(models[i].name);                   f.print(',');
+    f.print(models[i].tankVolumeMl);           f.print(',');
+    f.print(models[i].hasTankSensor ? 1 : 0);  f.print(',');
+    f.print(models[i].pumpSpeed);              f.print(',');
     f.println(models[i].picIndex);
   }
 
@@ -509,6 +552,67 @@ void LoadModelsFromSD()
 }
 
 // ===============================
+// SD CARD — STATION SAVE / LOAD
+// ===============================
+void SaveStationToSD()
+{
+  if (!SD.begin(SD_CS_PIN))
+  {
+    Serial.println("SD: station save failed - card not found");
+    return;
+  }
+
+  SD.remove(STATION_FILE);
+  File f = SD.open(STATION_FILE, FILE_WRITE);
+  if (!f)
+  {
+    Serial.println("SD: could not open station file for writing");
+    return;
+  }
+
+  f.println(supplyTankCapacityMl);
+  f.println(supplyTankRemainingMl);
+
+  f.close();
+  Serial.println("SD: station saved");
+}
+
+void LoadStationFromSD()
+{
+  if (!SD.begin(SD_CS_PIN))
+  {
+    Serial.println("SD: station load failed - using defaults");
+    return;
+  }
+
+  if (!SD.exists(STATION_FILE))
+  {
+    Serial.println("SD: no station file - using defaults");
+    return;
+  }
+
+  File f = SD.open(STATION_FILE, FILE_READ);
+  if (!f)
+  {
+    Serial.println("SD: could not open station file - using defaults");
+    return;
+  }
+
+  String line = f.readStringUntil('\n');
+  supplyTankCapacityMl = constrain(line.toInt(), 1000, 100000);
+
+  line = f.readStringUntil('\n');
+  supplyTankRemainingMl = constrain(line.toInt(), 0, supplyTankCapacityMl);
+
+  f.close();
+  Serial.println("SD: station loaded");
+  Serial.print("Supply tank: ");
+  Serial.print(supplyTankRemainingMl);
+  Serial.print(" / ");
+  Serial.println(supplyTankCapacityMl);
+}
+
+// ===============================
 // APPLY ACTIVE MODEL
 // ===============================
 void ApplyActiveModel()
@@ -519,7 +623,7 @@ void ApplyActiveModel()
 }
 
 // ===============================
-// UPDATE MAIN PAGE MODEL NAME
+// UPDATE MAIN PAGE MODEL
 // ===============================
 void UpdateMainPageModel()
 {
@@ -537,17 +641,6 @@ void ShowModelOnSetupPanel(int idx)
 
   ModelConfig &m = models[idx];
 
-  Serial.print("ShowModel idx=");
-  Serial.print(idx);
-  Serial.print(" name=");
-  Serial.print(m.name);
-  Serial.print(" vol=");
-  Serial.print(m.tankVolumeMl);
-  Serial.print(" spd=");
-  Serial.print(m.pumpSpeed);
-  Serial.print(" pic=");
-  Serial.println(m.picIndex);
-
   NxSetText(NX_S_NAME,    m.name);
   NxSetVal(NX_S_TANK_VOL, m.tankVolumeMl);
   NxSetText(NX_S_SENSOR,  m.hasTankSensor ? "YES" : "NO");
@@ -556,7 +649,7 @@ void ShowModelOnSetupPanel(int idx)
 }
 
 // ===============================
-// PUMP STOP IN PLACE (stays on current page)
+// PUMP STOP IN PLACE
 // ===============================
 static void StopPumpInPlace()
 {
@@ -619,6 +712,9 @@ void StopPump()
   digitalWrite(FILL_RELAY, LOW);
   digitalWrite(DRAIN_RELAY, LOW);
 
+  // Save supply tank remaining to SD whenever pump stops
+  SaveStationToSD();
+
   CurrentPage = MAINPAGE;
   NxGotoPage(PAGE_MAIN);
   NxSetText("tVersion", FW_VERSION);
@@ -659,6 +755,16 @@ void EnterFillPage()
   NxSetText(NX_PERCENT_FILL_OBJ,  "0%");
   NxSetVal(SLIDER_FILL,            models[activeModelIndex].pumpSpeed);
   NxSetText(NX_STOP_REASON_OBJ,   "");
+
+  // Initialise heli bar graph
+  NxSetVal(NX_HELI_BAR_OBJ, 0);
+  NxSetText(NX_HELI_PCT_OBJ, "0%");
+  char buf[32];
+  snprintf(buf, sizeof(buf), "0 / %dml", targetFillMl);
+  NxSetText(NX_HELI_VOL_OBJ, buf);
+
+  // Initialise supply tank bar graph
+  UpdateSupplyTankUI();
 }
 
 void EnterDrainPage()
@@ -681,13 +787,23 @@ void EnterDrainPage()
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
   NxSetVal(NX_VOLUME_DRAIN_OBJ,    0);
   NxSetVal(SLIDER_DRAIN,            models[activeModelIndex].pumpSpeed);
+
+  // Initialise heli bar graph — starts full, drains down
+  NxSetVal(NX_HELI_BAR_OBJ, 100);
+  NxSetText(NX_HELI_PCT_OBJ, "100%");
+  char buf[32];
+  snprintf(buf, sizeof(buf), "0 / %dml", models[activeModelIndex].tankVolumeMl);
+  NxSetText(NX_HELI_VOL_OBJ, buf);
+
+  // Initialise supply tank bar graph
+  UpdateSupplyTankUI();
 }
 
 void EnterSetupPage()
 {
   CurrentPage = SETUPPAGE;
   NxGotoPage(PAGE_SETUP);
-  ShowModelOnSetupPanel(activeModelIndex);  // Show currently active model first
+  ShowModelOnSetupPanel(activeModelIndex);
 }
 
 void BeginFill(int pwm)
@@ -761,8 +877,8 @@ static void UpdateFillUiAndStops(uint32_t now)
   float q_lpm     = hz / HZ_PER_LPM;
   int flow_ml_min = (int)(q_lpm * 1000.0f + 0.5f);
 
-  float liters    = (float)p / PULSES_PER_LITER;
-  int volume_ml   = (int)(liters * 1000.0f + 0.5f);
+  float liters  = (float)p / PULSES_PER_LITER;
+  int volume_ml = (int)(liters * 1000.0f + 0.5f);
 
   lastFillVolumeMl = volume_ml;
 
@@ -792,9 +908,20 @@ static void UpdateFillUiAndStops(uint32_t now)
     char pctStr[10];
     snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
     NxSetText(NX_PERCENT_FILL_OBJ, pctStr);
+
+    // Update heli bar graph
+    NxSetVal(NX_HELI_BAR_OBJ, pct);
+    NxSetText(NX_HELI_PCT_OBJ, pctStr);
+    char heliVolStr[32];
+    snprintf(heliVolStr, sizeof(heliVolStr), "%d / %dml", volume_ml, targetFillMl);
+    NxSetText(NX_HELI_VOL_OBJ, heliVolStr);
+
+    // Update supply tank — decreases as heli fills
+    supplyTankRemainingMl = supplyTankCapacityMl - volume_ml;
+    UpdateSupplyTankUI();
   }
 
-  // Auto-stops — stay on fill page so user can read the reason
+  // Auto-stops
   if (PumpEnabled)
   {
     if (targetFillMl > 0 && lastFillVolumeMl >= targetFillMl)
@@ -838,8 +965,8 @@ static void UpdateDrainUiAndStops(uint32_t now)
   float q_lpm     = hz / HZ_PER_LPM;
   int flow_ml_min = (int)(q_lpm * 1000.0f + 0.5f);
 
-  float liters    = (float)p / PULSES_PER_LITER;
-  int volume_ml   = (int)(liters * 1000.0f + 0.5f);
+  float liters  = (float)p / PULSES_PER_LITER;
+  int volume_ml = (int)(liters * 1000.0f + 0.5f);
 
   lastDrainVolumeMl = volume_ml;
 
@@ -853,6 +980,29 @@ static void UpdateDrainUiAndStops(uint32_t now)
   {
     gDrainUi.lastSentVol = volume_ml;
     NxSetVal(NX_VOLUME_DRAIN_OBJ, volume_ml);
+
+    // Update heli bar — decreases as fuel drains out
+    int heliPct = 100;
+    if (models[activeModelIndex].tankVolumeMl > 0)
+    {
+      heliPct = 100 - (int)((100.0f * (float)volume_ml) /
+                (float)models[activeModelIndex].tankVolumeMl + 0.5f);
+      heliPct = constrain(heliPct, 0, 100);
+    }
+    NxSetVal(NX_HELI_BAR_OBJ, heliPct);
+    char heliPctStr[10];
+    snprintf(heliPctStr, sizeof(heliPctStr), "%d%%", heliPct);
+    NxSetText(NX_HELI_PCT_OBJ, heliPctStr);
+    char heliVolStr[32];
+    snprintf(heliVolStr, sizeof(heliVolStr), "%d / %dml",
+             volume_ml, models[activeModelIndex].tankVolumeMl);
+    NxSetText(NX_HELI_VOL_OBJ, heliVolStr);
+
+    // Update supply tank — increases as heli drains back into it
+    supplyTankRemainingMl = constrain(
+      supplyTankCapacityMl - lastFillVolumeMl + volume_ml,
+      0, supplyTankCapacityMl);
+    UpdateSupplyTankUI();
   }
 
   if (PumpEnabled && targetDrainMl > 0 && lastDrainVolumeMl >= targetDrainMl)
@@ -965,19 +1115,18 @@ void ProcessNextion()
   static bool waitingForSpeed       = false;
   static bool waitingForTargetFill  = false;
   static bool waitingForTargetDrain = false;
-  static bool waitingForTankVol = false;
-  static bool waitingForPumpSpd = false;
-
+  static bool waitingForTankVol     = false;
+  static bool waitingForPumpSpd     = false;
 
   uint32_t v;
 
   while (ReadU32(v))
   {
-    // ALWAYS check waiting states FIRST before any command codes
+    // Always check waiting states first before any command codes
     if (waitingForTankVol)
     {
       waitingForTankVol = false;
-      models[previewModelIndex].tankVolumeMl = (int)constrain((int32_t)v, 0, 9999);
+      models[previewModelIndex].tankVolumeMl = (int)constrain((int32_t)v, 0, 99999);
       CurrentPage = SETUPPAGE;
       NxGotoPage(PAGE_SETUP);
       ShowModelOnSetupPanel(previewModelIndex);
@@ -994,17 +1143,6 @@ void ProcessNextion()
       continue;
     }
 
-    // Page report codes
-    if (v == NX_PAGE_REPORT_MAIN)  { CurrentPage = MAINPAGE;    continue; }
-    // ... rest of handlers 
-    
-    
-    // Page report codes
-    if (v == NX_PAGE_REPORT_MAIN)  { CurrentPage = MAINPAGE;    continue; }
-    if (v == NX_PAGE_REPORT_FILL)  { CurrentPage = FILLPAGE;    continue; }
-    if (v == NX_PAGE_REPORT_DRAIN) { CurrentPage = DRAINPAGE;   continue; }
-    if (v == NX_PAGE_REPORT_LOWBAT){ CurrentPage = LOWBATTPAGE; continue; }
-
     if (waitingForTargetFill)
     {
       waitingForTargetFill = false;
@@ -1014,6 +1152,11 @@ void ProcessNextion()
         NxSetVal(NX_TARGET_FILL_OBJ,   targetFillMl);
         NxSetVal(NX_PROGRESS_FILL_OBJ, 0);
         NxSetText(NX_PERCENT_FILL_OBJ, "0%");
+        NxSetVal(NX_HELI_BAR_OBJ, 0);
+        NxSetText(NX_HELI_PCT_OBJ, "0%");
+        char buf[32];
+        snprintf(buf, sizeof(buf), "0 / %dml", targetFillMl);
+        NxSetText(NX_HELI_VOL_OBJ, buf);
       }
       continue;
     }
@@ -1044,6 +1187,12 @@ void ProcessNextion()
       continue;
     }
 
+    // Page report codes
+    if (v == NX_PAGE_REPORT_MAIN)  { CurrentPage = MAINPAGE;    continue; }
+    if (v == NX_PAGE_REPORT_FILL)  { CurrentPage = FILLPAGE;    continue; }
+    if (v == NX_PAGE_REPORT_DRAIN) { CurrentPage = DRAINPAGE;   continue; }
+    if (v == NX_PAGE_REPORT_LOWBAT){ CurrentPage = LOWBATTPAGE; continue; }
+
     // Standard commands
     if (v == 1) { EnterFillPage();  continue; }
     if (v == 2) { EnterDrainPage(); continue; }
@@ -1057,11 +1206,11 @@ void ProcessNextion()
     if (v == 3000) { waitingForTargetDrain = true; continue; }
 
     // Setup page commands
-    if (v == NX_CMD_SETUP_PAGE) { EnterSetupPage();          continue; }
-    if (v == NX_CMD_MODEL1)     { ShowModelOnSetupPanel(0);  continue; }
-    if (v == NX_CMD_MODEL2)     { ShowModelOnSetupPanel(1);  continue; }
-    if (v == NX_CMD_MODEL3)     { ShowModelOnSetupPanel(2);  continue; }
-    if (v == NX_CMD_MODEL4)     { ShowModelOnSetupPanel(3);  continue; }
+    if (v == NX_CMD_SETUP_PAGE) { EnterSetupPage();         continue; }
+    if (v == NX_CMD_MODEL1)     { ShowModelOnSetupPanel(0); continue; }
+    if (v == NX_CMD_MODEL2)     { ShowModelOnSetupPanel(1); continue; }
+    if (v == NX_CMD_MODEL3)     { ShowModelOnSetupPanel(2); continue; }
+    if (v == NX_CMD_MODEL4)     { ShowModelOnSetupPanel(3); continue; }
 
     if (v == NX_CMD_SELECT)
     {
@@ -1078,63 +1227,8 @@ void ProcessNextion()
       continue;
     }
 
-     if (v == NX_CMD_BACK_SETUP)
-
-    if (waitingForTankVol)
+    if (v == NX_CMD_BACK_SETUP)
     {
-      waitingForTankVol = false;
-      models[previewModelIndex].tankVolumeMl = (int)constrain((int32_t)v, 0, 9999);
-      CurrentPage = SETUPPAGE;
-      NxGotoPage(PAGE_SETUP);
-      ShowModelOnSetupPanel(previewModelIndex);
-      continue;
-    }
-
-    if (waitingForPumpSpd)
-    {
-      waitingForPumpSpd = false;
-      models[previewModelIndex].pumpSpeed = (int)constrain((int32_t)v, 0, 255);
-      CurrentPage = SETUPPAGE;
-      NxGotoPage(PAGE_SETUP);
-      ShowModelOnSetupPanel(previewModelIndex);
-      continue;
-    }
-
-    if (v == 6001) { waitingForTankVol = true;  continue; }
-    if (v == 6002) { waitingForPumpSpd = true;  continue; }
-    if (v == 6003)
-    {
-      // Toggle tank sensor for previewed model
-      models[previewModelIndex].hasTankSensor = !models[previewModelIndex].hasTankSensor;
-      NxSetText(NX_S_SENSOR, models[previewModelIndex].hasTankSensor ? "YES" : "NO");
-      continue;
-    }
-if (waitingForTankVol)
-    {
-      waitingForTankVol = false;
-      models[previewModelIndex].tankVolumeMl = (int)constrain((int32_t)v, 0, 9999);
-      CurrentPage = SETUPPAGE;
-      NxGotoPage(PAGE_SETUP);
-      ShowModelOnSetupPanel(previewModelIndex);
-      continue;
-    }
-
-    if (waitingForPumpSpd)
-    {
-      waitingForPumpSpd = false;
-      models[previewModelIndex].pumpSpeed = (int)constrain((int32_t)v, 0, 255);
-      CurrentPage = SETUPPAGE;
-      NxGotoPage(PAGE_SETUP);
-      ShowModelOnSetupPanel(previewModelIndex);
-      continue;
-    }
-
-    if (v == 6001) { waitingForTankVol = true; continue; }
-    if (v == 6002) { waitingForPumpSpd = true; continue; }
-
-
-    {
-      // Auto select and save when leaving setup page
       activeModelIndex = previewModelIndex;
       ApplyActiveModel();
       SaveModelsToSD();
@@ -1147,6 +1241,8 @@ if (waitingForTankVol)
       continue;
     }
 
+    if (v == 6001) { waitingForTankVol = true; continue; }
+    if (v == 6002) { waitingForPumpSpd = true; continue; }
   }
 }
 
@@ -1186,8 +1282,9 @@ void setup()
   Wire.begin();
   ina219.begin();
 
-  // Load model configs from SD (uses defaults if no card/file found)
+  // Load configs from SD
   LoadModelsFromSD();
+  LoadStationFromSD();
   ApplyActiveModel();
 
   NEXTION.begin(NEXTION_BAUD);
@@ -1210,7 +1307,6 @@ void setup()
 
   filterInit = false;
   lowCount   = 0;
-
 }
 
 void loop()
