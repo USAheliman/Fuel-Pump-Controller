@@ -150,6 +150,7 @@ int previewModelIndex = 0;
 
 int supplyTankCapacityMl  = SUPPLY_TANK_DEFAULT_ML;
 int supplyTankRemainingMl = SUPPLY_TANK_DEFAULT_ML;
+int supplyAtSessionStartMl = SUPPLY_TANK_DEFAULT_ML;
 
 // ===============================
 // SESSION STATE
@@ -463,9 +464,10 @@ static void UpdateSupplyTankUI()
   snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
   NxSetText(NX_SUP_PCT_OBJ, pctStr);
 
+  float remainingL = supplyTankRemainingMl / 1000.0f;
+  float capacityL  = supplyTankCapacityMl  / 1000.0f;
   char volStr[32];
-  snprintf(volStr, sizeof(volStr), "%d / %dml",
-           supplyTankRemainingMl, supplyTankCapacityMl);
+  snprintf(volStr, sizeof(volStr), "%.1f / %.1fL", (double)remainingL, (double)capacityL);
   NxSetText(NX_SUP_VOL_OBJ, volStr);
 }
 
@@ -734,6 +736,7 @@ void EnterFillPage()
 {
   noInterrupts(); fillPulses = 0; interrupts();
   lastFillVolumeMl = 0;
+  int supplyAtFillStart = supplyTankRemainingMl;  // snapshot before filling
 
   ResetFlowUi(gFillUi);
 
@@ -744,6 +747,7 @@ void EnterFillPage()
   digitalWrite(DRAIN_RELAY, LOW);
 
   ApplyActiveModel();
+  supplyAtSessionStartMl = supplyTankRemainingMl;
 
   CurrentPage = FILLPAGE;
   NxGotoPage(PAGE_FILL);
@@ -782,6 +786,7 @@ void EnterDrainPage()
 
   CurrentPage = DRAINPAGE;
   NxGotoPage(PAGE_DRAIN);
+  supplyAtSessionStartMl = supplyTankRemainingMl;
 
   NxSetVal(NX_TARGET_DRAIN_OBJ,    targetDrainMl);
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
@@ -917,7 +922,7 @@ static void UpdateFillUiAndStops(uint32_t now)
     NxSetText(NX_HELI_VOL_OBJ, heliVolStr);
 
     // Update supply tank — decreases as heli fills
-    supplyTankRemainingMl = supplyTankCapacityMl - volume_ml;
+    supplyTankRemainingMl = supplyAtSessionStartMl - volume_ml;
     UpdateSupplyTankUI();
   }
 
@@ -1000,8 +1005,8 @@ static void UpdateDrainUiAndStops(uint32_t now)
 
     // Update supply tank — increases as heli drains back into it
     supplyTankRemainingMl = constrain(
-      supplyTankCapacityMl - lastFillVolumeMl + volume_ml,
-      0, supplyTankCapacityMl);
+    supplyAtSessionStartMl + volume_ml,
+    0, supplyTankCapacityMl);
     UpdateSupplyTankUI();
   }
 
