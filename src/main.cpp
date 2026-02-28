@@ -968,10 +968,37 @@ void ProcessNextion()
   static bool waitingForTankVol = false;
   static bool waitingForPumpSpd = false;
 
+
   uint32_t v;
 
   while (ReadU32(v))
   {
+    // ALWAYS check waiting states FIRST before any command codes
+    if (waitingForTankVol)
+    {
+      waitingForTankVol = false;
+      models[previewModelIndex].tankVolumeMl = (int)constrain((int32_t)v, 0, 9999);
+      CurrentPage = SETUPPAGE;
+      NxGotoPage(PAGE_SETUP);
+      ShowModelOnSetupPanel(previewModelIndex);
+      continue;
+    }
+
+    if (waitingForPumpSpd)
+    {
+      waitingForPumpSpd = false;
+      models[previewModelIndex].pumpSpeed = (int)constrain((int32_t)v, 0, 255);
+      CurrentPage = SETUPPAGE;
+      NxGotoPage(PAGE_SETUP);
+      ShowModelOnSetupPanel(previewModelIndex);
+      continue;
+    }
+
+    // Page report codes
+    if (v == NX_PAGE_REPORT_MAIN)  { CurrentPage = MAINPAGE;    continue; }
+    // ... rest of handlers 
+    
+    
     // Page report codes
     if (v == NX_PAGE_REPORT_MAIN)  { CurrentPage = MAINPAGE;    continue; }
     if (v == NX_PAGE_REPORT_FILL)  { CurrentPage = FILLPAGE;    continue; }
@@ -1082,6 +1109,29 @@ void ProcessNextion()
       NxSetText(NX_S_SENSOR, models[previewModelIndex].hasTankSensor ? "YES" : "NO");
       continue;
     }
+if (waitingForTankVol)
+    {
+      waitingForTankVol = false;
+      models[previewModelIndex].tankVolumeMl = (int)constrain((int32_t)v, 0, 9999);
+      CurrentPage = SETUPPAGE;
+      NxGotoPage(PAGE_SETUP);
+      ShowModelOnSetupPanel(previewModelIndex);
+      continue;
+    }
+
+    if (waitingForPumpSpd)
+    {
+      waitingForPumpSpd = false;
+      models[previewModelIndex].pumpSpeed = (int)constrain((int32_t)v, 0, 255);
+      CurrentPage = SETUPPAGE;
+      NxGotoPage(PAGE_SETUP);
+      ShowModelOnSetupPanel(previewModelIndex);
+      continue;
+    }
+
+    if (v == 6001) { waitingForTankVol = true; continue; }
+    if (v == 6002) { waitingForPumpSpd = true; continue; }
+
 
     {
       // Auto select and save when leaving setup page
