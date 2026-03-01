@@ -254,6 +254,8 @@ static uint8_t lowCount      = 0;
 // ===============================
 // FLOW UI STATE
 // ===============================
+#define FLOW_SMOOTH_SAMPLES 6
+
 struct FlowUiState
 {
   uint32_t lastMs     = 0;
@@ -261,6 +263,8 @@ struct FlowUiState
   int lastSentFlow    = -1;
   int lastSentVol     = -1;
   int lastSentPct     = -1;
+  int flowSamples[FLOW_SMOOTH_SAMPLES] = {0};
+  int flowSampleIdx   = 0;
 };
 
 static FlowUiState gFillUi;
@@ -273,6 +277,8 @@ static inline void ResetFlowUi(FlowUiState &s)
   s.lastSentFlow = -1;
   s.lastSentVol  = -1;
   s.lastSentPct  = -1;
+  for (int i = 0; i < FLOW_SMOOTH_SAMPLES; i++) s.flowSamples[i] = 0;
+  s.flowSampleIdx = 0;
 }
 
 // ===============================
@@ -970,7 +976,14 @@ static void UpdateFillUiAndStops(uint32_t now)
 
   float hz        = (dt > 0.0f) ? ((float)dp / dt) : 0.0f;
   float q_lpm     = hz / HZ_PER_LPM;
-  int flow_ml_min = (int)(q_lpm * 1000.0f + 0.5f);
+  int flow_ml_min_raw = (int)(q_lpm * 1000.0f + 0.5f);
+
+  // Rolling average
+  gFillUi.flowSamples[gFillUi.flowSampleIdx] = flow_ml_min_raw;
+  gFillUi.flowSampleIdx = (gFillUi.flowSampleIdx + 1) % FLOW_SMOOTH_SAMPLES;
+  int flowSum = 0;
+  for (int i = 0; i < FLOW_SMOOTH_SAMPLES; i++) flowSum += gFillUi.flowSamples[i];
+  int flow_ml_min = flowSum / FLOW_SMOOTH_SAMPLES;
 
   float liters  = (float)p / fillPulsesPerLiter;
   int volume_ml = (int)(liters * 1000.0f + 0.5f);
@@ -1055,7 +1068,14 @@ static void UpdateDrainUiAndStops(uint32_t now)
 
   float hz        = (dt > 0.0f) ? ((float)dp / dt) : 0.0f;
   float q_lpm     = hz / HZ_PER_LPM;
-  int flow_ml_min = (int)(q_lpm * 1000.0f + 0.5f);
+  int flow_ml_min_raw = (int)(q_lpm * 1000.0f + 0.5f);
+
+  // Rolling average
+  gDrainUi.flowSamples[gDrainUi.flowSampleIdx] = flow_ml_min_raw;
+  gDrainUi.flowSampleIdx = (gDrainUi.flowSampleIdx + 1) % FLOW_SMOOTH_SAMPLES;
+  int flowSum = 0;
+  for (int i = 0; i < FLOW_SMOOTH_SAMPLES; i++) flowSum += gDrainUi.flowSamples[i];
+  int flow_ml_min = flowSum / FLOW_SMOOTH_SAMPLES;
 
   float liters  = (float)p / drainPulsesPerLiter;
   int volume_ml = (int)(liters * 1000.0f + 0.5f);
@@ -1310,16 +1330,26 @@ void ProcessNextion()
       targetFillMl = (int)constrain((int32_t)v, 0, 2000000);
       if (CurrentPage == FILLPAGE)
       {
+        // Reset pulses so new target counts from zero
+        noInterrupts(); fillPulses = 0; interrupts();
+        lastFillVolumeMl = 0;
+        supplyAtSessionStartMl = supplyTankRemainingMl;
+        ResetFlowUi(gFillUi);
+
         NxSetVal(NX_TARGET_FILL_OBJ,   targetFillMl);
         NxSetVal(NX_PROGRESS_FILL_OBJ, 0);
         NxSetText(NX_PERCENT_FILL_OBJ, "0%");
+        NxSetText(NX_STOP_REASON_OBJ,  "");
+        NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+        NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+
+        // Reset heli bar
         NxSetVal(NX_HELI_BAR_OBJ, 0);
         NxSetText(NX_HELI_PCT_OBJ, "0%");
         char buf[32];
         snprintf(buf, sizeof(buf), "0 / %dml", targetFillMl);
         NxSetText(NX_HELI_VOL_OBJ, buf);
-        NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-        NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+        UpdateSupplyTankUI();
       }
       continue;
     }
@@ -1330,9 +1360,23 @@ void ProcessNextion()
       targetDrainMl = (int)constrain((int32_t)v, 0, 2000000);
       if (CurrentPage == DRAINPAGE)
       {
+        // Reset pulses so new target counts from zero
+        noInterrupts(); drainPulses = 0; interrupts();
+        lastDrainVolumeMl = 0;
+        supplyAtSessionStartMl = supplyTankRemainingMl;
+        ResetFlowUi(gDrainUi);
+
         NxSetVal(NX_TARGET_DRAIN_OBJ, targetDrainMl);
         NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
         NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+
+        // Reset heli bar to full for new drain segment
+        NxSetVal(NX_HELI_BAR_OBJ, 100);
+        NxSetText(NX_HELI_PCT_OBJ, "100%");
+        char buf[32];
+        snprintf(buf, sizeof(buf), "0 / %dml", targetDrainMl);
+        NxSetText(NX_HELI_VOL_OBJ, buf);
+        UpdateSupplyTankUI();
       }
       continue;
     }
@@ -1409,6 +1453,7 @@ void ProcessNextion()
       NxSetText("tVersion", FW_VERSION);
       NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
       UpdateMainPageModel();
+      UpdateSupplyTankUI();
       continue;
     }
 
@@ -1576,6 +1621,7 @@ void setup()
   NxGotoPage(PAGE_MAIN);
   NxSetText("tVersion", FW_VERSION);
   UpdateMainPageModel();
+  UpdateSupplyTankUI();
 
   NxSetVal(NX_VOLUME_MAIN_OBJ, 0);
 
