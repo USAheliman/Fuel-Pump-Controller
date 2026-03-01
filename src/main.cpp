@@ -561,12 +561,7 @@ static void UpdateSupplyTankUI()
   char volStr[32];
   snprintf(volStr, sizeof(volStr), "%.1f / %.1fL", (double)remainingL, (double)capacityL);
   NxSetText(NX_SUP_VOL_OBJ, volStr);
-
-  // Apply low warning colour immediately on update
-  bool isLow = (supplyTankRemainingMl <= supplyLowThresholdMl);
-  NxSetAttr("tSupVol.pco", isLow ? NX_COLOR_RED : NX_COLOR_TXT_NORMAL);
-  if (!isLow)
-    NxSetAttr("ProgSup.pco", NX_COLOR_GREEN_BAR);
+  // Colours are managed by UpdateSupplyLowWarning() - do not set here
 }
 
 // ===============================
@@ -872,6 +867,10 @@ void StopPump()
   if (wasPage == FILLPAGE)  showVol = lastFillVolumeMl;
   if (wasPage == DRAINPAGE) showVol = lastDrainVolumeMl;
   NxSetVal(NX_VOLUME_MAIN_OBJ, showVol);
+
+  // Refresh supply tank display with correct current values
+  UpdateSupplyTankUI();
+  UpdateSupplyLowWarning();
 }
 
 void EnterFillPage()
@@ -1085,6 +1084,7 @@ static void UpdateFillUiAndStops(uint32_t now)
 
     supplyTankRemainingMl = supplyAtSessionStartMl - volume_ml;
     UpdateSupplyTankUI();
+    UpdateSupplyLowWarning();
   }
 
   if (PumpEnabled)
@@ -1174,6 +1174,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
       supplyAtSessionStartMl + volume_ml,
       0, supplyTankCapacityMl);
     UpdateSupplyTankUI();
+    UpdateSupplyLowWarning();
   }
 
   if (PumpEnabled && targetDrainMl > 0 && lastDrainVolumeMl >= targetDrainMl)
