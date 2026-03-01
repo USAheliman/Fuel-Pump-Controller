@@ -45,6 +45,7 @@
 #define PAGE_DRAIN   "DrainPage"
 #define PAGE_LOWBATT "LowBatPage"
 #define PAGE_SETUP   "SetupPage"
+#define PAGE_STATION "StationPage"
 
 #define SLIDER_FILL  "PumpSpeedFill"
 #define SLIDER_DRAIN "PumpSpeedDrain"
@@ -92,6 +93,14 @@
 #define NX_SUP_PCT_OBJ  "tSupPct"
 #define NX_SUP_VOL_OBJ  "tSupVol"
 
+// Station page objects
+#define NX_ST_CAP_VAL         "tCapVal"
+#define NX_ST_REM_VAL         "tRemVal"
+#define NX_ST_FILL_PULSE_VAL  "tFillPulseVal"
+#define NX_ST_FILL_STATUS     "tFillCalStatus"
+#define NX_ST_DRAIN_PULSE_VAL "tDrainPulseVal"
+#define NX_ST_DRAIN_STATUS    "tDrainCalStat"
+
 // ===============================
 // PAGE STATE
 // ===============================
@@ -100,6 +109,7 @@
 #define DRAINPAGE   2
 #define LOWBATTPAGE 3
 #define SETUPPAGE   4
+#define STATIONPAGE 9
 
 uint8_t CurrentPage = MAINPAGE;
 bool PumpEnabled = false;
@@ -110,14 +120,29 @@ bool PumpEnabled = false;
 #define NX_PAGE_REPORT_LOWBAT 5004
 
 // Setup page command codes
-#define NX_CMD_SETUP_PAGE 4000
-#define NX_CMD_MODEL1     4001
-#define NX_CMD_MODEL2     4002
-#define NX_CMD_MODEL3     4003
-#define NX_CMD_MODEL4     4004
-#define NX_CMD_SELECT     4010
-#define NX_CMD_SAVE       4011
-#define NX_CMD_BACK_SETUP 4020
+#define NX_CMD_SETUP_PAGE  4000
+#define NX_CMD_MODEL1      4001
+#define NX_CMD_MODEL2      4002
+#define NX_CMD_MODEL3      4003
+#define NX_CMD_MODEL4      4004
+#define NX_CMD_SELECT      4010
+#define NX_CMD_SAVE        4011
+#define NX_CMD_BACK_SETUP  4020
+#define NX_CMD_STATION     4030
+
+// Station page command codes
+#define NX_CMD_BACK_STATION    7000
+#define NX_CMD_FILL_CAL_START  7001
+#define NX_CMD_FILL_CAL_STOP   7002
+#define NX_CMD_DRAIN_CAL_START 7003
+#define NX_CMD_DRAIN_CAL_STOP  7004
+#define NX_CMD_SET_CAP         7010
+#define NX_CMD_RESET_FULL      7011
+#define NX_CMD_FILL_CAL_VOL    7020
+#define NX_CMD_DRAIN_CAL_VOL   7021
+
+// Calibration pump speed (fixed)
+#define CAL_PWM 150
 
 // ===============================
 // MODEL CONFIGURATION
@@ -148,9 +173,23 @@ int previewModelIndex = 0;
 // ===============================
 #define SUPPLY_TANK_DEFAULT_ML 20000
 
-int supplyTankCapacityMl  = SUPPLY_TANK_DEFAULT_ML;
-int supplyTankRemainingMl = SUPPLY_TANK_DEFAULT_ML;
+int supplyTankCapacityMl   = SUPPLY_TANK_DEFAULT_ML;
+int supplyTankRemainingMl  = SUPPLY_TANK_DEFAULT_ML;
 int supplyAtSessionStartMl = SUPPLY_TANK_DEFAULT_ML;
+
+// ===============================
+// FLOW SENSOR CALIBRATION
+// ===============================
+#define FILL_PULSES_DEFAULT  1696.0f
+#define DRAIN_PULSES_DEFAULT 1696.0f
+
+float fillPulsesPerLiter  = FILL_PULSES_DEFAULT;
+float drainPulsesPerLiter = DRAIN_PULSES_DEFAULT;
+
+bool     fillCalActive       = false;
+bool     drainCalActive      = false;
+uint32_t fillCalStartPulses  = 0;
+uint32_t drainCalStartPulses = 0;
 
 // ===============================
 // SESSION STATE
@@ -183,10 +222,9 @@ int currentSpeedSigned = 0;
 int targetSpeedSigned  = 0;
 
 // ===============================
-// FLOW SENSOR CALIBRATION
+// FLOW SENSOR
 // ===============================
-#define HZ_PER_LPM       57.0f
-#define PULSES_PER_LITER 1696.0f
+#define HZ_PER_LPM 57.0f
 
 volatile uint32_t fillPulses  = 0;
 volatile uint32_t drainPulses = 0;
@@ -249,6 +287,7 @@ void StopPump();
 void EnterFillPage();
 void EnterDrainPage();
 void EnterSetupPage();
+void EnterStationPage();
 void BeginFill(int pwm);
 void BeginDrain(int pwm);
 void EnterLowBatteryPage(float packV, float vPerCell);
@@ -262,6 +301,7 @@ void ShowModelOnSetupPanel(int idx);
 void ApplyActiveModel();
 void UpdateMainPageModel();
 static void UpdateSupplyTankUI();
+static void UpdateStationPageValues();
 
 // ===============================
 // NEXTION TX HELPERS
@@ -445,6 +485,7 @@ static void DetectCellCount(float packV)
 
 // ===============================
 // SUPPLY TANK UI UPDATE
+// (used on Fill/Drain pages)
 // ===============================
 static void UpdateSupplyTankUI()
 {
@@ -469,6 +510,28 @@ static void UpdateSupplyTankUI()
   char volStr[32];
   snprintf(volStr, sizeof(volStr), "%.1f / %.1fL", (double)remainingL, (double)capacityL);
   NxSetText(NX_SUP_VOL_OBJ, volStr);
+}
+
+// ===============================
+// STATION PAGE VALUES UPDATE
+// ===============================
+static void UpdateStationPageValues()
+{
+  float capL = supplyTankCapacityMl  / 1000.0f;
+  float remL = supplyTankRemainingMl / 1000.0f;
+  char buf[32];
+
+  snprintf(buf, sizeof(buf), "%.1fL", (double)capL);
+  NxSetText(NX_ST_CAP_VAL, buf);
+
+  snprintf(buf, sizeof(buf), "%.1fL", (double)remL);
+  NxSetText(NX_ST_REM_VAL, buf);
+
+  snprintf(buf, sizeof(buf), "%.1f", (double)fillPulsesPerLiter);
+  NxSetText(NX_ST_FILL_PULSE_VAL, buf);
+
+  snprintf(buf, sizeof(buf), "%.1f", (double)drainPulsesPerLiter);
+  NxSetText(NX_ST_DRAIN_PULSE_VAL, buf);
 }
 
 // ===============================
@@ -574,6 +637,8 @@ void SaveStationToSD()
 
   f.println(supplyTankCapacityMl);
   f.println(supplyTankRemainingMl);
+  f.println((int)(fillPulsesPerLiter  * 10));  // stored x10 to preserve one decimal
+  f.println((int)(drainPulsesPerLiter * 10));
 
   f.close();
   Serial.println("SD: station saved");
@@ -606,12 +671,24 @@ void LoadStationFromSD()
   line = f.readStringUntil('\n');
   supplyTankRemainingMl = constrain(line.toInt(), 0, supplyTankCapacityMl);
 
+  line = f.readStringUntil('\n');
+  int fillX10 = line.toInt();
+  if (fillX10 > 0) fillPulsesPerLiter = fillX10 / 10.0f;
+
+  line = f.readStringUntil('\n');
+  int drainX10 = line.toInt();
+  if (drainX10 > 0) drainPulsesPerLiter = drainX10 / 10.0f;
+
   f.close();
   Serial.println("SD: station loaded");
-  Serial.print("Supply tank: ");
+  Serial.print("Supply: ");
   Serial.print(supplyTankRemainingMl);
   Serial.print(" / ");
   Serial.println(supplyTankCapacityMl);
+  Serial.print("Fill cal: ");
+  Serial.println((double)fillPulsesPerLiter);
+  Serial.print("Drain cal: ");
+  Serial.println((double)drainPulsesPerLiter);
 }
 
 // ===============================
@@ -714,7 +791,6 @@ void StopPump()
   digitalWrite(FILL_RELAY, LOW);
   digitalWrite(DRAIN_RELAY, LOW);
 
-  // Save supply tank remaining to SD whenever pump stops
   SaveStationToSD();
 
   CurrentPage = MAINPAGE;
@@ -735,8 +811,8 @@ void StopPump()
 void EnterFillPage()
 {
   noInterrupts(); fillPulses = 0; interrupts();
-  lastFillVolumeMl = 0;
-  int supplyAtFillStart = supplyTankRemainingMl;  // snapshot before filling
+  lastFillVolumeMl       = 0;
+  supplyAtSessionStartMl = supplyTankRemainingMl;
 
   ResetFlowUi(gFillUi);
 
@@ -747,7 +823,6 @@ void EnterFillPage()
   digitalWrite(DRAIN_RELAY, LOW);
 
   ApplyActiveModel();
-  supplyAtSessionStartMl = supplyTankRemainingMl;
 
   CurrentPage = FILLPAGE;
   NxGotoPage(PAGE_FILL);
@@ -760,21 +835,20 @@ void EnterFillPage()
   NxSetVal(SLIDER_FILL,            models[activeModelIndex].pumpSpeed);
   NxSetText(NX_STOP_REASON_OBJ,   "");
 
-  // Initialise heli bar graph
   NxSetVal(NX_HELI_BAR_OBJ, 0);
   NxSetText(NX_HELI_PCT_OBJ, "0%");
   char buf[32];
   snprintf(buf, sizeof(buf), "0 / %dml", targetFillMl);
   NxSetText(NX_HELI_VOL_OBJ, buf);
 
-  // Initialise supply tank bar graph
   UpdateSupplyTankUI();
 }
 
 void EnterDrainPage()
 {
   noInterrupts(); drainPulses = 0; interrupts();
-  lastDrainVolumeMl = 0;
+  lastDrainVolumeMl      = 0;
+  supplyAtSessionStartMl = supplyTankRemainingMl;
 
   ResetFlowUi(gDrainUi);
 
@@ -786,21 +860,18 @@ void EnterDrainPage()
 
   CurrentPage = DRAINPAGE;
   NxGotoPage(PAGE_DRAIN);
-  supplyAtSessionStartMl = supplyTankRemainingMl;
 
   NxSetVal(NX_TARGET_DRAIN_OBJ,    targetDrainMl);
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
   NxSetVal(NX_VOLUME_DRAIN_OBJ,    0);
   NxSetVal(SLIDER_DRAIN,            models[activeModelIndex].pumpSpeed);
 
-  // Initialise heli bar graph — starts full, drains down
   NxSetVal(NX_HELI_BAR_OBJ, 100);
   NxSetText(NX_HELI_PCT_OBJ, "100%");
   char buf[32];
   snprintf(buf, sizeof(buf), "0 / %dml", models[activeModelIndex].tankVolumeMl);
   NxSetText(NX_HELI_VOL_OBJ, buf);
 
-  // Initialise supply tank bar graph
   UpdateSupplyTankUI();
 }
 
@@ -809,6 +880,19 @@ void EnterSetupPage()
   CurrentPage = SETUPPAGE;
   NxGotoPage(PAGE_SETUP);
   ShowModelOnSetupPanel(activeModelIndex);
+}
+
+void EnterStationPage()
+{
+  fillCalActive  = false;
+  drainCalActive = false;
+  StopPumpInPlace();
+
+  CurrentPage = STATIONPAGE;
+  NxGotoPage(PAGE_STATION);
+  UpdateStationPageValues();
+  NxSetText(NX_ST_FILL_STATUS,  "Ready - Press Start to begin");
+  NxSetText(NX_ST_DRAIN_STATUS, "Ready - Press Start to begin");
 }
 
 void BeginFill(int pwm)
@@ -882,7 +966,7 @@ static void UpdateFillUiAndStops(uint32_t now)
   float q_lpm     = hz / HZ_PER_LPM;
   int flow_ml_min = (int)(q_lpm * 1000.0f + 0.5f);
 
-  float liters  = (float)p / PULSES_PER_LITER;
+  float liters  = (float)p / fillPulsesPerLiter;
   int volume_ml = (int)(liters * 1000.0f + 0.5f);
 
   lastFillVolumeMl = volume_ml;
@@ -914,19 +998,16 @@ static void UpdateFillUiAndStops(uint32_t now)
     snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
     NxSetText(NX_PERCENT_FILL_OBJ, pctStr);
 
-    // Update heli bar graph
     NxSetVal(NX_HELI_BAR_OBJ, pct);
     NxSetText(NX_HELI_PCT_OBJ, pctStr);
     char heliVolStr[32];
     snprintf(heliVolStr, sizeof(heliVolStr), "%d / %dml", volume_ml, targetFillMl);
     NxSetText(NX_HELI_VOL_OBJ, heliVolStr);
 
-    // Update supply tank — decreases as heli fills
     supplyTankRemainingMl = supplyAtSessionStartMl - volume_ml;
     UpdateSupplyTankUI();
   }
 
-  // Auto-stops
   if (PumpEnabled)
   {
     if (targetFillMl > 0 && lastFillVolumeMl >= targetFillMl)
@@ -970,7 +1051,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
   float q_lpm     = hz / HZ_PER_LPM;
   int flow_ml_min = (int)(q_lpm * 1000.0f + 0.5f);
 
-  float liters  = (float)p / PULSES_PER_LITER;
+  float liters  = (float)p / drainPulsesPerLiter;
   int volume_ml = (int)(liters * 1000.0f + 0.5f);
 
   lastDrainVolumeMl = volume_ml;
@@ -986,7 +1067,6 @@ static void UpdateDrainUiAndStops(uint32_t now)
     gDrainUi.lastSentVol = volume_ml;
     NxSetVal(NX_VOLUME_DRAIN_OBJ, volume_ml);
 
-    // Update heli bar — decreases as fuel drains out
     int heliPct = 100;
     if (models[activeModelIndex].tankVolumeMl > 0)
     {
@@ -1003,10 +1083,9 @@ static void UpdateDrainUiAndStops(uint32_t now)
              volume_ml, models[activeModelIndex].tankVolumeMl);
     NxSetText(NX_HELI_VOL_OBJ, heliVolStr);
 
-    // Update supply tank — increases as heli drains back into it
     supplyTankRemainingMl = constrain(
-    supplyAtSessionStartMl + volume_ml,
-    0, supplyTankCapacityMl);
+      supplyAtSessionStartMl + volume_ml,
+      0, supplyTankCapacityMl);
     UpdateSupplyTankUI();
   }
 
@@ -1044,7 +1123,7 @@ static void UpdatePowerUIAndSafety()
 
   DetectCellCount(filteredPackV);
 
-  if (cellCount > 0 && CurrentPage != SETUPPAGE)
+  if (cellCount > 0 && CurrentPage != SETUPPAGE && CurrentPage != STATIONPAGE)
     NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
 
   float vPerCell_raw = (cellCount > 0) ? (packV_raw     / (float)cellCount) : packV_raw;
@@ -1066,7 +1145,7 @@ static void UpdatePowerUIAndSafety()
     if (lowBatteryLatched) return;
   }
 
-  if (CurrentPage != LOWBATTPAGE && CurrentPage != SETUPPAGE)
+  if (CurrentPage != LOWBATTPAGE && CurrentPage != SETUPPAGE && CurrentPage != STATIONPAGE)
   {
     int battPct = LiPoPctFromV(vPerCell_f);
     int curPct  = CurrentToPct(currentA);
@@ -1117,17 +1196,20 @@ void ProcessNextion()
     return;
   }
 
-  static bool waitingForSpeed       = false;
-  static bool waitingForTargetFill  = false;
-  static bool waitingForTargetDrain = false;
-  static bool waitingForTankVol     = false;
-  static bool waitingForPumpSpd     = false;
+  static bool waitingForSpeed        = false;
+  static bool waitingForTargetFill   = false;
+  static bool waitingForTargetDrain  = false;
+  static bool waitingForTankVol      = false;
+  static bool waitingForPumpSpd      = false;
+  static bool waitingForSupplyCap    = false;
+  static bool waitingForFillCalVol   = false;
+  static bool waitingForDrainCalVol  = false;
 
   uint32_t v;
 
   while (ReadU32(v))
   {
-    // Always check waiting states first before any command codes
+    // Always check waiting states first
     if (waitingForTankVol)
     {
       waitingForTankVol = false;
@@ -1145,6 +1227,72 @@ void ProcessNextion()
       CurrentPage = SETUPPAGE;
       NxGotoPage(PAGE_SETUP);
       ShowModelOnSetupPanel(previewModelIndex);
+      continue;
+    }
+
+    if (waitingForSupplyCap)
+    {
+      waitingForSupplyCap = false;
+      // User types whole litres e.g. 20 for 20L
+      int litres = (int)constrain((int32_t)v, 1, 100);
+      supplyTankCapacityMl  = litres * 1000;
+      supplyTankRemainingMl = constrain(supplyTankRemainingMl, 0, supplyTankCapacityMl);
+      SaveStationToSD();
+      UpdateStationPageValues();
+      continue;
+    }
+
+    if (waitingForFillCalVol)
+    {
+      waitingForFillCalVol = false;
+      int actualMl = (int)constrain((int32_t)v, 1, 10000);
+
+      noInterrupts();
+      uint32_t calPulses = fillPulses;   // pulses were zeroed at cal start
+      interrupts();
+
+      if (actualMl > 0 && calPulses > 0)
+      {
+        fillPulsesPerLiter = (calPulses * 1000.0f) / (float)actualMl;
+        SaveStationToSD();
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Done! New Pulses/L: %.1f", (double)fillPulsesPerLiter);
+        NxSetText(NX_ST_FILL_STATUS, buf);
+        UpdateStationPageValues();
+        Serial.print("Fill cal done. Pulses/L: ");
+        Serial.println((double)fillPulsesPerLiter);
+      }
+      else
+      {
+        NxSetText(NX_ST_FILL_STATUS, "Error - no pulses detected");
+      }
+      continue;
+    }
+
+    if (waitingForDrainCalVol)
+    {
+      waitingForDrainCalVol = false;
+      int actualMl = (int)constrain((int32_t)v, 1, 10000);
+
+      noInterrupts();
+      uint32_t calPulses = drainPulses;  // pulses were zeroed at cal start
+      interrupts();
+
+      if (actualMl > 0 && calPulses > 0)
+      {
+        drainPulsesPerLiter = (calPulses * 1000.0f) / (float)actualMl;
+        SaveStationToSD();
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Done! New Pulses/L: %.1f", (double)drainPulsesPerLiter);
+        NxSetText(NX_ST_DRAIN_STATUS, buf);
+        UpdateStationPageValues();
+        Serial.print("Drain cal done. Pulses/L: ");
+        Serial.println((double)drainPulsesPerLiter);
+      }
+      else
+      {
+        NxSetText(NX_ST_DRAIN_STATUS, "Error - no pulses detected");
+      }
       continue;
     }
 
@@ -1193,10 +1341,10 @@ void ProcessNextion()
     }
 
     // Page report codes
-    if (v == NX_PAGE_REPORT_MAIN)  { CurrentPage = MAINPAGE;    continue; }
-    if (v == NX_PAGE_REPORT_FILL)  { CurrentPage = FILLPAGE;    continue; }
-    if (v == NX_PAGE_REPORT_DRAIN) { CurrentPage = DRAINPAGE;   continue; }
-    if (v == NX_PAGE_REPORT_LOWBAT){ CurrentPage = LOWBATTPAGE; continue; }
+    if (v == NX_PAGE_REPORT_MAIN)   { CurrentPage = MAINPAGE;    continue; }
+    if (v == NX_PAGE_REPORT_FILL)   { CurrentPage = FILLPAGE;    continue; }
+    if (v == NX_PAGE_REPORT_DRAIN)  { CurrentPage = DRAINPAGE;   continue; }
+    if (v == NX_PAGE_REPORT_LOWBAT) { CurrentPage = LOWBATTPAGE; continue; }
 
     // Standard commands
     if (v == 1) { EnterFillPage();  continue; }
@@ -1206,8 +1354,8 @@ void ProcessNextion()
     if (v == 11) { if (CurrentPage == FILLPAGE)  BeginFill(MIN_PWM);  continue; }
     if (v == 12) { if (CurrentPage == DRAINPAGE) BeginDrain(MIN_PWM); continue; }
 
-    if (v == 1000) { waitingForSpeed       = true; continue; }
-    if (v == 2000) { waitingForTargetFill  = true; continue; }
+    if (v == 1000) { waitingForSpeed      = true; continue; }
+    if (v == 2000) { waitingForTargetFill = true; continue; }
     if (v == 3000) { waitingForTargetDrain = true; continue; }
 
     // Setup page commands
@@ -1226,11 +1374,7 @@ void ProcessNextion()
       continue;
     }
 
-    if (v == NX_CMD_SAVE)
-    {
-      SaveModelsToSD();
-      continue;
-    }
+    if (v == NX_CMD_SAVE)  { SaveModelsToSD(); continue; }
 
     if (v == NX_CMD_BACK_SETUP)
     {
@@ -1246,8 +1390,115 @@ void ProcessNextion()
       continue;
     }
 
+    if (v == NX_CMD_STATION) { EnterStationPage(); continue; }
+
     if (v == 6001) { waitingForTankVol = true; continue; }
     if (v == 6002) { waitingForPumpSpd = true; continue; }
+
+    // Station page commands
+    if (v == NX_CMD_BACK_STATION)
+    {
+      fillCalActive  = false;
+      drainCalActive = false;
+      StopPumpInPlace();
+
+      CurrentPage = SETUPPAGE;
+      NxGotoPage(PAGE_SETUP);
+      ShowModelOnSetupPanel(activeModelIndex);
+      continue;
+    }
+
+    if (v == NX_CMD_RESET_FULL)
+    {
+      supplyTankRemainingMl = supplyTankCapacityMl;
+      SaveStationToSD();
+      UpdateStationPageValues();
+      Serial.println("Supply tank reset to full");
+      continue;
+    }
+
+    if (v == NX_CMD_SET_CAP) { waitingForSupplyCap = true; continue; }
+
+    if (v == NX_CMD_FILL_CAL_START)
+    {
+      if (drainCalActive)
+      {
+        NxSetText(NX_ST_FILL_STATUS, "Stop drain cal first");
+        continue;
+      }
+      noInterrupts(); fillPulses = 0; interrupts();
+      fillCalActive = true;
+
+      PumpDriverEnable();
+      PumpEnabled = true;
+      digitalWrite(FILL_RELAY, HIGH);
+      digitalWrite(DRAIN_RELAY, LOW);
+      SetTargetSpeed(+CAL_PWM);
+
+      NxSetText(NX_ST_FILL_STATUS, "Running - collect fuel then press Stop");
+      Serial.println("Fill cal started");
+      continue;
+    }
+
+    if (v == NX_CMD_FILL_CAL_STOP)
+    {
+      if (!fillCalActive) continue;
+      StopPumpInPlace();
+      fillCalActive = false;
+
+      noInterrupts();
+      uint32_t totalPulses = fillPulses;
+      interrupts();
+
+      char buf[64];
+      snprintf(buf, sizeof(buf), "Stopped. %lu pulses - enter actual vol", (unsigned long)totalPulses);
+      NxSetText(NX_ST_FILL_STATUS, buf);
+      Serial.print("Fill cal stopped. Pulses: ");
+      Serial.println(totalPulses);
+      continue;
+    }
+
+    if (v == NX_CMD_DRAIN_CAL_START)
+    {
+      if (fillCalActive)
+      {
+        NxSetText(NX_ST_DRAIN_STATUS, "Stop fill cal first");
+        continue;
+      }
+      noInterrupts(); drainPulses = 0; interrupts();
+      drainCalActive = true;
+
+      PumpDriverEnable();
+      PumpEnabled = true;
+      digitalWrite(FILL_RELAY, LOW);
+      digitalWrite(DRAIN_RELAY, HIGH);
+      SetTargetSpeed(-CAL_PWM);
+
+      NxSetText(NX_ST_DRAIN_STATUS, "Running - collect fuel then press Stop");
+      Serial.println("Drain cal started");
+      continue;
+    }
+
+    if (v == NX_CMD_DRAIN_CAL_STOP)
+    {
+      if (!drainCalActive) continue;
+      StopPumpInPlace();
+      drainCalActive = false;
+
+      noInterrupts();
+      uint32_t totalPulses = drainPulses;
+      interrupts();
+
+      char buf[64];
+      snprintf(buf, sizeof(buf), "Stopped. %lu pulses - enter actual vol", (unsigned long)totalPulses);
+      NxSetText(NX_ST_DRAIN_STATUS, buf);
+      Serial.print("Drain cal stopped. Pulses: ");
+      Serial.println(totalPulses);
+      continue;
+    }
+
+    if (v == NX_CMD_FILL_CAL_VOL)  { waitingForFillCalVol  = true; continue; }
+    if (v == NX_CMD_DRAIN_CAL_VOL) { waitingForDrainCalVol = true; continue; }
   }
 }
 
@@ -1287,7 +1538,6 @@ void setup()
   Wire.begin();
   ina219.begin();
 
-  // Load configs from SD
   LoadModelsFromSD();
   LoadStationFromSD();
   ApplyActiveModel();
