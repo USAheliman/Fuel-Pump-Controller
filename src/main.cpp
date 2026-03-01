@@ -159,10 +159,10 @@ struct ModelConfig
 };
 
 ModelConfig models[NUM_MODELS] = {
-  { "BO 105",   2000, true,  127, 5 },
-  { "Whiplash", 1000, false, 127, 7 },
-  { "Alouette", 1500, true,  127, 4 },
-  { "EC 145",   3000, true,  127, 6 },
+  { "BO 105",   2000, true,  127, 3 },
+  { "Whiplash", 1000, false, 127, 5 },
+  { "Alouette", 1500, true,  127, 2 },
+  { "EC 145",   3000, true,  127, 4 },
 };
 
 int activeModelIndex  = 0;
@@ -827,6 +827,9 @@ void EnterFillPage()
   CurrentPage = FILLPAGE;
   NxGotoPage(PAGE_FILL);
 
+  NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+
   NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
   NxSetVal(NX_FLOW_RATE_FILL_OBJ, 0);
   NxSetVal(NX_VOLUME_FILL_OBJ,    0);
@@ -860,6 +863,9 @@ void EnterDrainPage()
 
   CurrentPage = DRAINPAGE;
   NxGotoPage(PAGE_DRAIN);
+
+  NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
 
   NxSetVal(NX_TARGET_DRAIN_OBJ,    targetDrainMl);
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
@@ -1067,11 +1073,12 @@ static void UpdateDrainUiAndStops(uint32_t now)
     gDrainUi.lastSentVol = volume_ml;
     NxSetVal(NX_VOLUME_DRAIN_OBJ, volume_ml);
 
+    int drainRef = (targetDrainMl > 0) ? targetDrainMl : models[activeModelIndex].tankVolumeMl;
     int heliPct = 100;
-    if (models[activeModelIndex].tankVolumeMl > 0)
+    if (drainRef > 0)
     {
       heliPct = 100 - (int)((100.0f * (float)volume_ml) /
-                (float)models[activeModelIndex].tankVolumeMl + 0.5f);
+                (float)drainRef + 0.5f);
       heliPct = constrain(heliPct, 0, 100);
     }
     NxSetVal(NX_HELI_BAR_OBJ, heliPct);
@@ -1079,8 +1086,8 @@ static void UpdateDrainUiAndStops(uint32_t now)
     snprintf(heliPctStr, sizeof(heliPctStr), "%d%%", heliPct);
     NxSetText(NX_HELI_PCT_OBJ, heliPctStr);
     char heliVolStr[32];
-    snprintf(heliVolStr, sizeof(heliVolStr), "%d / %dml",
-             volume_ml, models[activeModelIndex].tankVolumeMl);
+   snprintf(heliVolStr, sizeof(heliVolStr), "%d / %dml",
+             volume_ml, drainRef);
     NxSetText(NX_HELI_VOL_OBJ, heliVolStr);
 
     supplyTankRemainingMl = constrain(
@@ -1091,7 +1098,8 @@ static void UpdateDrainUiAndStops(uint32_t now)
 
   if (PumpEnabled && targetDrainMl > 0 && lastDrainVolumeMl >= targetDrainMl)
   {
-    StopPump();
+    NxSetText(NX_STOP_REASON_OBJ, "Stopped: Target volume reached");
+    StopPumpInPlace();
     return;
   }
 }
@@ -1310,6 +1318,8 @@ void ProcessNextion()
         char buf[32];
         snprintf(buf, sizeof(buf), "0 / %dml", targetFillMl);
         NxSetText(NX_HELI_VOL_OBJ, buf);
+        NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+        NxSetPic("mMainPic", models[activeModelIndex].picIndex);
       }
       continue;
     }
@@ -1318,7 +1328,12 @@ void ProcessNextion()
     {
       waitingForTargetDrain = false;
       targetDrainMl = (int)constrain((int32_t)v, 0, 2000000);
-      if (CurrentPage == DRAINPAGE) NxSetVal(NX_TARGET_DRAIN_OBJ, targetDrainMl);
+      if (CurrentPage == DRAINPAGE)
+      {
+        NxSetVal(NX_TARGET_DRAIN_OBJ, targetDrainMl);
+        NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+        NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+      }
       continue;
     }
 
@@ -1349,7 +1364,14 @@ void ProcessNextion()
     // Standard commands
     if (v == 1) { EnterFillPage();  continue; }
     if (v == 2) { EnterDrainPage(); continue; }
-    if (v == 3) { StopPump();       continue; }
+    if (v == 3)
+    {
+      if (CurrentPage == DRAINPAGE && PumpEnabled)
+        StopPumpInPlace();
+      else
+        StopPump();
+      continue;
+    }
 
     if (v == 11) { if (CurrentPage == FILLPAGE)  BeginFill(MIN_PWM);  continue; }
     if (v == 12) { if (CurrentPage == DRAINPAGE) BeginDrain(MIN_PWM); continue; }
