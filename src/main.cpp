@@ -96,6 +96,7 @@
 // Station page objects
 #define NX_ST_CAP_VAL         "tCapVal"
 #define NX_ST_REM_VAL         "tRemVal"
+#define NX_ST_LOW_VAL         "tLowVal"
 #define NX_ST_FILL_PULSE_VAL  "tFillPulseVal"
 #define NX_ST_FILL_STATUS     "tFillCalStatus"
 #define NX_ST_DRAIN_PULSE_VAL "tDrainPulseVal"
@@ -138,6 +139,7 @@ bool PumpEnabled = false;
 #define NX_CMD_DRAIN_CAL_STOP  7004
 #define NX_CMD_SET_CAP         7010
 #define NX_CMD_RESET_FULL      7011
+#define NX_CMD_SET_LOW         7012
 #define NX_CMD_FILL_CAL_VOL    7020
 #define NX_CMD_DRAIN_CAL_VOL   7021
 
@@ -172,10 +174,16 @@ int previewModelIndex = 0;
 // SUPPLY TANK
 // ===============================
 #define SUPPLY_TANK_DEFAULT_ML 20000
+#define SUPPLY_LOW_DEFAULT_ML   2000  // 2L default warning threshold
 
 int supplyTankCapacityMl   = SUPPLY_TANK_DEFAULT_ML;
 int supplyTankRemainingMl  = SUPPLY_TANK_DEFAULT_ML;
 int supplyAtSessionStartMl = SUPPLY_TANK_DEFAULT_ML;
+int supplyLowThresholdMl   = SUPPLY_LOW_DEFAULT_ML;
+
+// Flash state for low supply warning
+static bool     supplyLowFlash    = false;
+static uint32_t supplyFlashLastMs = 0;
 
 // ===============================
 // FLOW SENSOR CALIBRATION
@@ -307,6 +315,7 @@ void ShowModelOnSetupPanel(int idx);
 void ApplyActiveModel();
 void UpdateMainPageModel();
 static void UpdateSupplyTankUI();
+static void UpdateSupplyLowWarning();
 static void UpdateStationPageValues();
 
 // ===============================
@@ -489,9 +498,45 @@ static void DetectCellCount(float packV)
   else cellCount = 2;
 }
 
+// Nextion colour constants
+#define NX_COLOR_WHITE       65535
+#define NX_COLOR_TXT_NORMAL  1055   // tSupVol normal pco
+#define NX_COLOR_RED         63488
+#define NX_COLOR_GREEN_BAR   1024   // ProgSup pco (bar fill colour)
+
+// ===============================
+// SUPPLY LOW WARNING FLASH
+// Called from UpdatePowerUIAndSafety every 500ms
+// ===============================
+static void NxSetAttr(const char* objAttr, int val)
+{
+  char buf[72];
+  snprintf(buf, sizeof(buf), "%s=%d", objAttr, val);
+  NxCmd(buf);
+}
+
+static void UpdateSupplyLowWarning()
+{
+  if (CurrentPage != FILLPAGE && CurrentPage != MAINPAGE && CurrentPage != DRAINPAGE) return;
+
+  bool isLow = (supplyTankRemainingMl <= supplyLowThresholdMl);
+
+  if (!isLow)
+  {
+    NxSetAttr("ProgSup.pco", NX_COLOR_GREEN_BAR);
+    NxSetAttr("tSupVol.pco", NX_COLOR_TXT_NORMAL);
+    supplyLowFlash = false;
+    return;
+  }
+
+  supplyLowFlash = !supplyLowFlash;
+  NxSetAttr("ProgSup.pco", supplyLowFlash ? NX_COLOR_RED : NX_COLOR_GREEN_BAR);
+  NxSetAttr("tSupVol.pco", NX_COLOR_RED);
+}
+
 // ===============================
 // SUPPLY TANK UI UPDATE
-// (used on Fill/Drain pages)
+// (used on Fill/Drain/Main pages)
 // ===============================
 static void UpdateSupplyTankUI()
 {
@@ -516,6 +561,12 @@ static void UpdateSupplyTankUI()
   char volStr[32];
   snprintf(volStr, sizeof(volStr), "%.1f / %.1fL", (double)remainingL, (double)capacityL);
   NxSetText(NX_SUP_VOL_OBJ, volStr);
+
+  // Apply low warning colour immediately on update
+  bool isLow = (supplyTankRemainingMl <= supplyLowThresholdMl);
+  NxSetAttr("tSupVol.pco", isLow ? NX_COLOR_RED : NX_COLOR_TXT_NORMAL);
+  if (!isLow)
+    NxSetAttr("ProgSup.pco", NX_COLOR_GREEN_BAR);
 }
 
 // ===============================
@@ -525,6 +576,7 @@ static void UpdateStationPageValues()
 {
   float capL = supplyTankCapacityMl  / 1000.0f;
   float remL = supplyTankRemainingMl / 1000.0f;
+  float lowL = supplyLowThresholdMl  / 1000.0f;
   char buf[32];
 
   snprintf(buf, sizeof(buf), "%.1fL", (double)capL);
@@ -532,6 +584,9 @@ static void UpdateStationPageValues()
 
   snprintf(buf, sizeof(buf), "%.1fL", (double)remL);
   NxSetText(NX_ST_REM_VAL, buf);
+
+  snprintf(buf, sizeof(buf), "%.1fL", (double)lowL);
+  NxSetText(NX_ST_LOW_VAL, buf);
 
   snprintf(buf, sizeof(buf), "%.1f", (double)fillPulsesPerLiter);
   NxSetText(NX_ST_FILL_PULSE_VAL, buf);
@@ -645,6 +700,7 @@ void SaveStationToSD()
   f.println(supplyTankRemainingMl);
   f.println((int)(fillPulsesPerLiter  * 10));  // stored x10 to preserve one decimal
   f.println((int)(drainPulsesPerLiter * 10));
+  f.println(supplyLowThresholdMl);
 
   f.close();
   Serial.println("SD: station saved");
@@ -684,6 +740,10 @@ void LoadStationFromSD()
   line = f.readStringUntil('\n');
   int drainX10 = line.toInt();
   if (drainX10 > 0) drainPulsesPerLiter = drainX10 / 10.0f;
+
+  line = f.readStringUntil('\n');
+  int lowMl = line.toInt();
+  if (lowMl > 0) supplyLowThresholdMl = constrain(lowMl, 500, supplyTankCapacityMl);
 
   f.close();
   Serial.println("SD: station loaded");
@@ -1199,6 +1259,9 @@ static void UpdatePowerUIAndSafety()
     if (lowCount >= SAG_TRIP_COUNT)
       EnterLowBatteryPage(packV_raw, vPerCell_raw);
   }
+
+  // Flash supply tank warning if low
+  UpdateSupplyLowWarning();
 }
 
 // ===============================
@@ -1230,6 +1293,7 @@ void ProcessNextion()
   static bool waitingForTankVol      = false;
   static bool waitingForPumpSpd      = false;
   static bool waitingForSupplyCap    = false;
+  static bool waitingForSupplyLow    = false;
   static bool waitingForFillCalVol   = false;
   static bool waitingForDrainCalVol  = false;
 
@@ -1267,6 +1331,18 @@ void ProcessNextion()
       supplyTankRemainingMl = constrain(supplyTankRemainingMl, 0, supplyTankCapacityMl);
       SaveStationToSD();
       UpdateStationPageValues();
+      continue;
+    }
+
+    if (waitingForSupplyLow)
+    {
+      waitingForSupplyLow = false;
+      int litres = (int)constrain((int32_t)v, 1, 99);
+      supplyLowThresholdMl = litres * 1000;
+      SaveStationToSD();
+      UpdateStationPageValues();
+      Serial.print("Supply low threshold: ");
+      Serial.println(supplyLowThresholdMl);
       continue;
     }
 
@@ -1485,6 +1561,7 @@ void ProcessNextion()
     }
 
     if (v == NX_CMD_SET_CAP) { waitingForSupplyCap = true; continue; }
+    if (v == NX_CMD_SET_LOW) { waitingForSupplyLow = true; continue; }
 
     if (v == NX_CMD_FILL_CAL_START)
     {
