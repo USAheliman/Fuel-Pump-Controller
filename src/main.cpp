@@ -97,6 +97,7 @@
 #define NX_ST_CAP_VAL         "tCapVal"
 #define NX_ST_REM_VAL         "tRemVal"
 #define NX_ST_LOW_VAL         "tLowVal"
+#define NX_ST_FLOW_DROP_VAL   "tFlowDrop"
 #define NX_ST_FILL_PULSE_VAL  "tFillPulseVal"
 #define NX_ST_FILL_STATUS     "tFillCalStatus"
 #define NX_ST_DRAIN_PULSE_VAL "tDrainPulseVal"
@@ -140,6 +141,7 @@ bool PumpEnabled = false;
 #define NX_CMD_SET_CAP         7010
 #define NX_CMD_RESET_FULL      7011
 #define NX_CMD_SET_LOW         7012
+#define NX_CMD_SET_FLOW_DROP   7013
 #define NX_CMD_FILL_CAL_VOL    7020
 #define NX_CMD_DRAIN_CAL_VOL   7021
 
@@ -185,6 +187,10 @@ int supplyLowThresholdMl   = SUPPLY_LOW_DEFAULT_ML;
 static bool     supplyLowFlash    = false;
 static uint32_t supplyFlashLastMs = 0;
 
+// Flash state for StopReason message (auto sequence status)
+static bool stopReasonFlash       = false;
+static bool stopReasonFlashActive = false;
+
 // ===============================
 // FLOW SENSOR CALIBRATION
 // ===============================
@@ -200,8 +206,26 @@ uint32_t fillCalStartPulses  = 0;
 uint32_t drainCalStartPulses = 0;
 
 // ===============================
-// SESSION STATE
+// AUTO DRAIN-THEN-FILL SEQUENCE
 // ===============================
+enum AutoFillState { AF_NONE, AF_DRAIN_PENDING, AF_DRAINING, AF_FILLING };
+AutoFillState autoFillSequence = AF_NONE;
+
+static uint32_t autoFillTransitionMs = 0;  // timestamp for drain->fill pause
+#define AUTO_FILL_PAUSE_MS 2000            // 2 second pause between drain and fill
+
+// ===============================
+// TANK EMPTY DETECTION
+// ===============================
+#define TANK_EMPTY_FLOW_DROP_DEFAULT 30  // 30% drop from peak = tank empty
+#define TANK_EMPTY_MIN_RUN_MS       3000 // must run 3s before detection active
+#define TANK_EMPTY_CONFIRM_COUNT    2    // consecutive low readings to confirm
+#define TANK_EMPTY_MIN_PEAK_FLOW    200  // ml/min — if peak never reaches this after min run, tank was already empty
+
+int      tankEmptyFlowDropPct  = TANK_EMPTY_FLOW_DROP_DEFAULT;
+int      drainPeakFlowMlMin    = 0;
+uint32_t drainStartMs          = 0;
+uint8_t  tankEmptyCount        = 0;
 int lastFillVolumeMl  = 0;
 int lastDrainVolumeMl = 0;
 int targetFillMl      = 0;
@@ -223,8 +247,8 @@ int ApplyMinimumFloor(uint32_t raw)
 // ===============================
 // RAMP SETTINGS
 // ===============================
-#define RAMP_INTERVAL_MS 10
-#define RAMP_STEP        3
+#define RAMP_INTERVAL_MS 20
+#define RAMP_STEP        2
 
 int currentSpeedSigned = 0;
 int targetSpeedSigned  = 0;
@@ -304,6 +328,7 @@ void EnterSetupPage();
 void EnterStationPage();
 void BeginFill(int pwm);
 void BeginDrain(int pwm);
+void BeginAutoSequenceDrain();
 void EnterLowBatteryPage(float packV, float vPerCell);
 void UpdateFlowDisplaysAutoStopAndProgress();
 void InitFlowSensors();
@@ -502,6 +527,7 @@ static void DetectCellCount(float packV)
 #define NX_COLOR_WHITE       65535
 #define NX_COLOR_TXT_NORMAL  1055   // tSupVol normal pco
 #define NX_COLOR_RED         63488
+#define NX_COLOR_BLACK       0
 #define NX_COLOR_GREEN_BAR   1024   // ProgSup pco (bar fill colour)
 
 // ===============================
@@ -532,6 +558,19 @@ static void UpdateSupplyLowWarning()
   supplyLowFlash = !supplyLowFlash;
   NxSetAttr("ProgSup.pco", supplyLowFlash ? NX_COLOR_RED : NX_COLOR_GREEN_BAR);
   NxSetAttr("tSupVol.pco", NX_COLOR_RED);
+}
+
+// ===============================
+// STOP REASON FLASH
+// Called from UpdatePowerUIAndSafety every 500ms
+// ===============================
+static void UpdateStopReasonFlash()
+{
+  if (!stopReasonFlashActive) return;
+  if (CurrentPage != FILLPAGE && CurrentPage != DRAINPAGE) return;
+
+  stopReasonFlash = !stopReasonFlash;
+  NxSetAttr("StopReason.pco", stopReasonFlash ? NX_COLOR_RED : NX_COLOR_BLACK);
 }
 
 // ===============================
@@ -582,6 +621,9 @@ static void UpdateStationPageValues()
 
   snprintf(buf, sizeof(buf), "%.1fL", (double)lowL);
   NxSetText(NX_ST_LOW_VAL, buf);
+
+  snprintf(buf, sizeof(buf), "%d%%", tankEmptyFlowDropPct);
+  NxSetText(NX_ST_FLOW_DROP_VAL, buf);
 
   snprintf(buf, sizeof(buf), "%.1f", (double)fillPulsesPerLiter);
   NxSetText(NX_ST_FILL_PULSE_VAL, buf);
@@ -696,6 +738,7 @@ void SaveStationToSD()
   f.println((int)(fillPulsesPerLiter  * 10));  // stored x10 to preserve one decimal
   f.println((int)(drainPulsesPerLiter * 10));
   f.println(supplyLowThresholdMl);
+  f.println(tankEmptyFlowDropPct);
 
   f.close();
   Serial.println("SD: station saved");
@@ -739,6 +782,10 @@ void LoadStationFromSD()
   line = f.readStringUntil('\n');
   int lowMl = line.toInt();
   if (lowMl > 0) supplyLowThresholdMl = constrain(lowMl, 500, supplyTankCapacityMl);
+
+  line = f.readStringUntil('\n');
+  int dropPct = line.toInt();
+  if (dropPct > 0) tankEmptyFlowDropPct = constrain(dropPct, 5, 90);
 
   f.close();
   Serial.println("SD: station loaded");
@@ -875,6 +922,14 @@ void StopPump()
 
 void EnterFillPage()
 {
+  // Models without tank sensor use auto drain-then-fill sequence
+  if (!models[activeModelIndex].hasTankSensor)
+  {
+    ApplyActiveModel();
+    BeginAutoSequenceDrain();
+    return;
+  }
+
   noInterrupts(); fillPulses = 0; interrupts();
   lastFillVolumeMl       = 0;
   supplyAtSessionStartMl = supplyTankRemainingMl;
@@ -902,6 +957,8 @@ void EnterFillPage()
   NxSetText(NX_PERCENT_FILL_OBJ,  "0%");
   NxSetVal(SLIDER_FILL,            models[activeModelIndex].pumpSpeed);
   NxSetText(NX_STOP_REASON_OBJ,   "");
+  stopReasonFlashActive = false;
+  NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
 
   NxSetVal(NX_HELI_BAR_OBJ, 0);
   NxSetText(NX_HELI_PCT_OBJ, "0%");
@@ -916,6 +973,7 @@ void EnterDrainPage()
 {
   noInterrupts(); drainPulses = 0; interrupts();
   lastDrainVolumeMl      = 0;
+  targetDrainMl          = models[activeModelIndex].tankVolumeMl;
   supplyAtSessionStartMl = supplyTankRemainingMl;
 
   ResetFlowUi(gDrainUi);
@@ -939,8 +997,9 @@ void EnterDrainPage()
 
   NxSetVal(NX_HELI_BAR_OBJ, 100);
   NxSetText(NX_HELI_PCT_OBJ, "100%");
+  int drainRef = (targetDrainMl > 0) ? targetDrainMl : models[activeModelIndex].tankVolumeMl;
   char buf[32];
-  snprintf(buf, sizeof(buf), "0 / %dml", models[activeModelIndex].tankVolumeMl);
+  snprintf(buf, sizeof(buf), "0 / %dml", drainRef);
   NxSetText(NX_HELI_VOL_OBJ, buf);
 
   UpdateSupplyTankUI();
@@ -983,10 +1042,11 @@ void BeginFill(int pwm)
   PumpDriverEnable();
   PumpEnabled = true;
 
+  NEXTION.flush();  // drain serial buffer before pump starts
+
   digitalWrite(FILL_RELAY, HIGH);
   digitalWrite(DRAIN_RELAY, LOW);
 
-  NxSetVal(SLIDER_FILL, pwm);
   SetTargetSpeed(+pwm);
 }
 
@@ -1001,16 +1061,63 @@ void BeginDrain(int pwm)
   PumpDriverEnable();
   PumpEnabled = true;
 
+  NEXTION.flush();  // drain serial buffer before pump starts
+
+  // Reset tank empty detection for new drain session
+  drainPeakFlowMlMin = 0;
+  tankEmptyCount     = 0;
+  drainStartMs       = millis();
+
   digitalWrite(FILL_RELAY, LOW);
   digitalWrite(DRAIN_RELAY, HIGH);
 
-  NxSetVal(SLIDER_DRAIN, pwm);
   SetTargetSpeed(-pwm);
 }
 
 // ===============================
-// FLOW + VOLUME + AUTO-STOP
+// AUTO DRAIN-THEN-FILL SEQUENCE
 // ===============================
+void BeginAutoSequenceDrain()
+{
+  // Set pending state immediately — pump starts after delay
+  autoFillSequence     = AF_DRAIN_PENDING;
+  autoFillTransitionMs = millis();
+
+  // Set up drain page for auto sequence
+  noInterrupts(); drainPulses = 0; interrupts();
+  lastDrainVolumeMl      = 0;
+  targetDrainMl          = 0;  // continuous drain until tank empty detected
+  supplyAtSessionStartMl = supplyTankRemainingMl;
+
+  ResetFlowUi(gDrainUi);
+
+  PumpEnabled = false;
+  SetTargetSpeed(0);
+  SetPumpOutput(0);
+  currentSpeedSigned = 0;
+  digitalWrite(FILL_RELAY, LOW);
+  digitalWrite(DRAIN_RELAY, LOW);
+
+  CurrentPage = DRAINPAGE;
+  NxGotoPage(PAGE_DRAIN);
+
+  NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+  NxSetText(NX_STOP_REASON_OBJ, "Auto sequence: Draining...");
+  stopReasonFlashActive = true;
+
+  int drainRef = models[activeModelIndex].tankVolumeMl;
+  NxSetVal(NX_TARGET_DRAIN_OBJ,    0);
+  NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
+  NxSetVal(NX_VOLUME_DRAIN_OBJ,    0);
+  // Do NOT set slider here — avoids any possible feedback loop
+  NxSetVal(NX_HELI_BAR_OBJ, 100);
+  NxSetText(NX_HELI_PCT_OBJ, "100%");
+  char buf[32];
+  snprintf(buf, sizeof(buf), "0 / %dml", drainRef);
+  NxSetText(NX_HELI_VOL_OBJ, buf);
+  UpdateSupplyTankUI();
+}
 static void UpdateFillUiAndStops(uint32_t now)
 {
   if (CurrentPage != FILLPAGE) return;
@@ -1092,12 +1199,16 @@ static void UpdateFillUiAndStops(uint32_t now)
     if (targetFillMl > 0 && lastFillVolumeMl >= targetFillMl)
     {
       NxSetText(NX_STOP_REASON_OBJ, "Stopped: Target volume reached");
+      stopReasonFlashActive = false;
+      NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
       StopPumpInPlace();
       return;
     }
     if (models[activeModelIndex].hasTankSensor && IsTankFull())
     {
       NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank full sensor");
+      stopReasonFlashActive = false;
+      NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
       StopPumpInPlace();
       return;
     }
@@ -1183,6 +1294,67 @@ static void UpdateDrainUiAndStops(uint32_t now)
     StopPumpInPlace();
     return;
   }
+
+  // Tank empty detection — only when pump running for minimum time
+  if (PumpEnabled && (millis() - drainStartMs) >= TANK_EMPTY_MIN_RUN_MS)
+  {
+    // Update peak flow
+    if (flow_ml_min > drainPeakFlowMlMin)
+    {
+      drainPeakFlowMlMin = flow_ml_min;
+      tankEmptyCount = 0;  // reset counter if flow rises
+    }
+
+    // Tank was already empty — peak flow never reached a meaningful level
+    if (drainPeakFlowMlMin < TANK_EMPTY_MIN_PEAK_FLOW)
+    {
+      if (autoFillSequence == AF_DRAINING)
+      {
+        StopPumpInPlace();
+        autoFillTransitionMs = millis();
+        NxSetText(NX_STOP_REASON_OBJ, "Auto sequence: Tank empty - starting fill...");
+      stopReasonFlashActive = true;
+      }
+      else
+      {
+        NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank already empty");
+      stopReasonFlashActive = false;
+      NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
+        StopPumpInPlace();
+      }
+      return;
+    }
+
+    // Tank had fuel — check for flow drop indicating tank now empty
+    int threshold = drainPeakFlowMlMin * (100 - tankEmptyFlowDropPct) / 100;
+    if (flow_ml_min < threshold)
+    {
+      tankEmptyCount++;
+      if (tankEmptyCount >= TANK_EMPTY_CONFIRM_COUNT)
+      {
+        if (autoFillSequence == AF_DRAINING)
+        {
+          // Auto sequence — transition to fill after pause
+          StopPumpInPlace();
+          autoFillTransitionMs = millis();
+          NxSetText(NX_STOP_REASON_OBJ, "Auto sequence: Tank empty - starting fill...");
+      stopReasonFlashActive = true;
+        }
+        else
+        {
+          NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank empty detected");
+      stopReasonFlashActive = false;
+      NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
+          StopPumpInPlace();
+        }
+        return;
+      }
+    }
+    else
+    {
+      tankEmptyCount = 0;
+    }
+  }
 }
 
 void UpdateFlowDisplaysAutoStopAndProgress()
@@ -1190,6 +1362,62 @@ void UpdateFlowDisplaysAutoStopAndProgress()
   uint32_t now = millis();
   UpdateFillUiAndStops(now);
   UpdateDrainUiAndStops(now);
+
+  // Auto drain-then-fill: delayed pump start
+  if (autoFillSequence == AF_DRAIN_PENDING)
+  {
+    if (now - autoFillTransitionMs >= 500)  // 500ms delay for Nextion to settle
+    {
+      autoFillSequence = AF_DRAINING;
+      BeginDrain(models[activeModelIndex].pumpSpeed);
+    }
+    return;
+  }
+
+  // Auto drain-then-fill transition: drain done, wait then start fill
+  if (autoFillSequence == AF_DRAINING && !PumpEnabled && autoFillTransitionMs > 0)
+  {
+    if (now - autoFillTransitionMs >= AUTO_FILL_PAUSE_MS)
+    {
+      autoFillTransitionMs = 0;
+      autoFillSequence = AF_FILLING;
+
+      // Switch to fill page and start filling
+      noInterrupts(); fillPulses = 0; interrupts();
+      lastFillVolumeMl       = 0;
+      supplyAtSessionStartMl = supplyTankRemainingMl;
+      ResetFlowUi(gFillUi);
+
+      CurrentPage = FILLPAGE;
+      NxGotoPage(PAGE_FILL);
+
+      NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+      NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+      NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
+      NxSetVal(NX_FLOW_RATE_FILL_OBJ, 0);
+      NxSetVal(NX_VOLUME_FILL_OBJ,    0);
+      NxSetVal(NX_PROGRESS_FILL_OBJ,  0);
+      NxSetText(NX_PERCENT_FILL_OBJ,  "0%");
+      // Do NOT set slider here — avoids any possible echo from Nextion
+      NxSetText(NX_STOP_REASON_OBJ,   "Auto sequence: Filling...");
+      stopReasonFlashActive = true;
+      NxSetVal(NX_HELI_BAR_OBJ, 0);
+      NxSetText(NX_HELI_PCT_OBJ, "0%");
+      char buf[32];
+      snprintf(buf, sizeof(buf), "0 / %dml", targetFillMl);
+      NxSetText(NX_HELI_VOL_OBJ, buf);
+      UpdateSupplyTankUI();
+
+      NEXTION.flush();  // discard anything Nextion sent during page transition
+      BeginFill(models[activeModelIndex].pumpSpeed);
+    }
+  }
+
+  // Auto fill complete
+  if (autoFillSequence == AF_FILLING && !PumpEnabled)
+  {
+    autoFillSequence = AF_NONE;
+  }
 }
 
 // ===============================
@@ -1263,6 +1491,9 @@ static void UpdatePowerUIAndSafety()
 
   // Flash supply tank warning if low
   UpdateSupplyLowWarning();
+
+  // Flash stop reason message if active
+  UpdateStopReasonFlash();
 }
 
 // ===============================
@@ -1293,8 +1524,10 @@ void ProcessNextion()
   static bool waitingForTargetDrain  = false;
   static bool waitingForTankVol      = false;
   static bool waitingForPumpSpd      = false;
+  static bool waitingForSensor        = false;
   static bool waitingForSupplyCap    = false;
   static bool waitingForSupplyLow    = false;
+  static bool waitingForFlowDrop     = false;
   static bool waitingForFillCalVol   = false;
   static bool waitingForDrainCalVol  = false;
 
@@ -1323,6 +1556,16 @@ void ProcessNextion()
       continue;
     }
 
+    if (waitingForSensor)
+    {
+      waitingForSensor = false;
+      models[previewModelIndex].hasTankSensor = (v == 1);
+      CurrentPage = SETUPPAGE;
+      NxGotoPage(PAGE_SETUP);
+      ShowModelOnSetupPanel(previewModelIndex);
+      continue;
+    }
+
     if (waitingForSupplyCap)
     {
       waitingForSupplyCap = false;
@@ -1344,6 +1587,18 @@ void ProcessNextion()
       UpdateStationPageValues();
       Serial.print("Supply low threshold: ");
       Serial.println(supplyLowThresholdMl);
+      continue;
+    }
+
+    if (waitingForFlowDrop)
+    {
+      waitingForFlowDrop = false;
+      tankEmptyFlowDropPct = (int)constrain((int32_t)v, 5, 90);
+      SaveStationToSD();
+      UpdateStationPageValues();
+      Serial.print("Tank empty flow drop: ");
+      Serial.print(tankEmptyFlowDropPct);
+      Serial.println("%");
       continue;
     }
 
@@ -1417,6 +1672,8 @@ void ProcessNextion()
         NxSetVal(NX_PROGRESS_FILL_OBJ, 0);
         NxSetText(NX_PERCENT_FILL_OBJ, "0%");
         NxSetText(NX_STOP_REASON_OBJ,  "");
+      stopReasonFlashActive = false;
+      NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
         NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
         NxSetPic("mMainPic", models[activeModelIndex].picIndex);
 
@@ -1463,6 +1720,12 @@ void ProcessNextion()
       waitingForSpeed = false;
       int spd = ApplyMinimumFloor(v);
 
+      // Block speed commands during auto drain-then-fill sequence
+      if (autoFillSequence != AF_NONE)
+      {
+        continue;
+      }
+
       if (CurrentPage == FILLPAGE)
       {
         if (!PumpEnabled && spd > 0) BeginFill(spd);
@@ -1487,6 +1750,11 @@ void ProcessNextion()
     if (v == 2) { EnterDrainPage(); continue; }
     if (v == 3)
     {
+      autoFillSequence      = AF_NONE;
+      autoFillTransitionMs  = 0;
+      drainPeakFlowMlMin    = 0;
+      tankEmptyCount        = 0;
+      stopReasonFlashActive = false;
       if (CurrentPage == DRAINPAGE && PumpEnabled)
         StopPumpInPlace();
       else
@@ -1536,8 +1804,9 @@ void ProcessNextion()
 
     if (v == NX_CMD_STATION) { EnterStationPage(); continue; }
 
-    if (v == 6001) { waitingForTankVol = true; continue; }
-    if (v == 6002) { waitingForPumpSpd = true; continue; }
+    if (v == 6001) { waitingForTankVol  = true; continue; }
+    if (v == 6002) { waitingForPumpSpd  = true; continue; }
+    if (v == 6003) { waitingForSensor   = true; continue; }
 
     // Station page commands
     if (v == NX_CMD_BACK_STATION)
@@ -1562,7 +1831,8 @@ void ProcessNextion()
     }
 
     if (v == NX_CMD_SET_CAP) { waitingForSupplyCap = true; continue; }
-    if (v == NX_CMD_SET_LOW) { waitingForSupplyLow = true; continue; }
+    if (v == NX_CMD_SET_LOW)       { waitingForSupplyLow  = true; continue; }
+    if (v == NX_CMD_SET_FLOW_DROP) { waitingForFlowDrop   = true; continue; }
 
     if (v == NX_CMD_FILL_CAL_START)
     {
