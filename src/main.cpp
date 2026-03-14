@@ -324,6 +324,8 @@ void UpdateRamp();
 void StopPump();
 void EnterFillPage();
 void EnterDrainPage();
+void RefreshFillPage();
+void RefreshDrainPage();
 void EnterSetupPage();
 void EnterStationPage();
 void BeginFill(int pwm);
@@ -969,6 +971,37 @@ void EnterFillPage()
   UpdateSupplyTankUI();
 }
 
+void RefreshFillPage()
+{
+  // Resend all current fill page values to Nextion (called on page reload)
+  NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+
+  NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
+  NxSetVal(NX_FLOW_RATE_FILL_OBJ, gFillUi.lastSentFlow > 0 ? gFillUi.lastSentFlow : 0);
+  NxSetVal(NX_VOLUME_FILL_OBJ,    lastFillVolumeMl);
+
+  int pct = 0;
+  if (targetFillMl > 0)
+  {
+    pct = (int)((100.0f * (float)lastFillVolumeMl) / (float)targetFillMl + 0.5f);
+    pct = constrain(pct, 0, 100);
+  }
+  NxSetVal(NX_PROGRESS_FILL_OBJ, pct);
+  char pctStr[10];
+  snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+  NxSetText(NX_PERCENT_FILL_OBJ, pctStr);
+
+  NxSetVal(NX_HELI_BAR_OBJ, pct);
+  NxSetText(NX_HELI_PCT_OBJ, pctStr);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%d / %dml", lastFillVolumeMl, targetFillMl);
+  NxSetText(NX_HELI_VOL_OBJ, buf);
+
+  UpdateSupplyTankUI();
+  UpdateSupplyLowWarning();
+}
+
 void EnterDrainPage()
 {
   noInterrupts(); drainPulses = 0; interrupts();
@@ -1003,6 +1036,35 @@ void EnterDrainPage()
   NxSetText(NX_HELI_VOL_OBJ, buf);
 
   UpdateSupplyTankUI();
+}
+
+void RefreshDrainPage()
+{
+  // Resend all current drain page values to Nextion (called on page reload)
+  NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
+  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+
+  int drainRef = (targetDrainMl > 0) ? targetDrainMl : models[activeModelIndex].tankVolumeMl;
+  NxSetVal(NX_TARGET_DRAIN_OBJ,    drainRef);
+  NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, gDrainUi.lastSentFlow > 0 ? gDrainUi.lastSentFlow : 0);
+  NxSetVal(NX_VOLUME_DRAIN_OBJ,    lastDrainVolumeMl);
+
+  int heliPct = 100;
+  if (drainRef > 0)
+  {
+    heliPct = 100 - (int)((100.0f * (float)lastDrainVolumeMl) / (float)drainRef + 0.5f);
+    heliPct = constrain(heliPct, 0, 100);
+  }
+  NxSetVal(NX_HELI_BAR_OBJ, heliPct);
+  char pctStr[10];
+  snprintf(pctStr, sizeof(pctStr), "%d%%", heliPct);
+  NxSetText(NX_HELI_PCT_OBJ, pctStr);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%d / %dml", lastDrainVolumeMl, drainRef);
+  NxSetText(NX_HELI_VOL_OBJ, buf);
+
+  UpdateSupplyTankUI();
+  UpdateSupplyLowWarning();
 }
 
 void EnterSetupPage()
@@ -1741,8 +1803,18 @@ void ProcessNextion()
 
     // Page report codes
     if (v == NX_PAGE_REPORT_MAIN)   { CurrentPage = MAINPAGE;    continue; }
-    if (v == NX_PAGE_REPORT_FILL)   { CurrentPage = FILLPAGE;    continue; }
-    if (v == NX_PAGE_REPORT_DRAIN)  { CurrentPage = DRAINPAGE;   continue; }
+    if (v == NX_PAGE_REPORT_FILL)
+    {
+      CurrentPage = FILLPAGE;
+      RefreshFillPage();
+      continue;
+    }
+    if (v == NX_PAGE_REPORT_DRAIN)
+    {
+      CurrentPage = DRAINPAGE;
+      RefreshDrainPage();
+      continue;
+    }
     if (v == NX_PAGE_REPORT_LOWBAT) { CurrentPage = LOWBATTPAGE; continue; }
 
     // Standard commands
