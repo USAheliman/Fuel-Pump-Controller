@@ -104,6 +104,7 @@
 #define NX_ST_REM_VAL         "tRemVal"
 #define NX_ST_LOW_VAL         "tLowVal"
 #define NX_ST_FLOW_DROP_VAL   "tFlowDrop"
+#define NX_ST_EMPTY_DELAY_VAL "tEmptyDelay"
 #define NX_ST_FILL_PULSE_VAL  "tFillPulseVal"
 #define NX_ST_FILL_STATUS     "tFillCalStatus"
 #define NX_ST_DRAIN_PULSE_VAL "tDrainPulseVal"
@@ -129,6 +130,7 @@ bool PumpEnabled = false;
 
 // Setup page command codes
 #define NX_CMD_SETUP_PAGE  4000
+#define NX_CMD_SETUP_REFRESH 4005  // Post-init refresh — does not navigate
 #define NX_CMD_MODEL1      4001
 #define NX_CMD_MODEL2      4002
 #define NX_CMD_MODEL3      4003
@@ -148,6 +150,7 @@ bool PumpEnabled = false;
 #define NX_CMD_RESET_FULL      7011
 #define NX_CMD_SET_LOW         7012
 #define NX_CMD_SET_FLOW_DROP   7013
+#define NX_CMD_SET_EMPTY_DELAY 7014
 #define NX_CMD_FILL_CAL_VOL    7020
 #define NX_CMD_DRAIN_CAL_VOL   7021
 
@@ -168,17 +171,17 @@ struct ModelConfig
   char    name[24];
   int     tankVolumeMl;
   bool    hasTankSensor;
-  int     pumpSpeed;         // fill speed
+  int     pumpSpeed;         // fill speed (ml/min)
   uint8_t picIndex;
   int     overflowPurgeSecs; // 0 = skip purge, 1-10 seconds
-  int     drainSpeed;        // drain speed (all drain operations including purge)
+  int     drainSpeed;        // drain speed (ml/min)
 };
 
 ModelConfig models[NUM_MODELS] = {
-  { "BO 105",   2000, true,  127, 3, 3, 127 },
-  { "Whiplash", 1000, false, 127, 5, 3, 127 },
-  { "Alouette", 1500, true,  127, 2, 3, 127 },
-  { "EC 145",   3000, true,  127, 4, 3, 127 },
+  { "BO 105",   2000, true,  500, 3, 3, 500 },
+  { "Whiplash", 1000, false, 500, 5, 3, 500 },
+  { "Alouette", 1500, true,  500, 2, 3, 500 },
+  { "EC 145",   3000, true,  500, 4, 3, 500 },
 };
 
 int activeModelIndex  = 0;
@@ -254,7 +257,8 @@ uint8_t closedLoopSettledCount  = 0;  // consecutive readings within tolerance
 // TANK EMPTY DETECTION
 // ===============================
 #define TANK_EMPTY_FLOW_DROP_DEFAULT 30  // 30% drop from peak = tank empty
-#define TANK_EMPTY_MIN_RUN_MS       3000 // must run 3s before detection active
+#define TANK_EMPTY_MIN_RUN_MS_DEFAULT 8000  // default 8s
+uint32_t tankEmptyMinRunMs = TANK_EMPTY_MIN_RUN_MS_DEFAULT;
 #define TANK_EMPTY_CONFIRM_COUNT    2    // consecutive low readings to confirm
 #define TANK_EMPTY_MIN_PEAK_FLOW    200  // ml/min — if peak never reaches this after min run, tank was already empty
 
@@ -391,7 +395,7 @@ void RefreshFillPage();
 void RefreshDrainPage();
 void EnterSetupPage();
 void EnterStationPage();
-void BeginFill(int mlMin);
+void BeginFill(int pwm);
 void BeginDrain(int pwm);
 void BeginAutoSequenceDrain();
 void BeginOverflowPurge();
@@ -691,6 +695,9 @@ static void UpdateStationPageValues()
   snprintf(buf, sizeof(buf), "%d%%", tankEmptyFlowDropPct);
   NxSetText(NX_ST_FLOW_DROP_VAL, buf);
 
+  snprintf(buf, sizeof(buf), "%ds", (int)(tankEmptyMinRunMs / 1000));
+  NxSetText(NX_ST_EMPTY_DELAY_VAL, buf);
+
   snprintf(buf, sizeof(buf), "%.1f", (double)fillPulsesPerLiter);
   NxSetText(NX_ST_FILL_PULSE_VAL, buf);
 
@@ -779,7 +786,7 @@ void LoadModelsFromSD()
     int c6 = line.indexOf(',', c5 + 1);
     models[i].picIndex          = (uint8_t)(c5 > 0 ? line.substring(c4+1, c5).toInt() : line.substring(c4+1).toInt());
     models[i].overflowPurgeSecs = (c5 > 0) ? constrain(line.substring(c5+1, c6 > 0 ? c6 : line.length()).toInt(), 0, 10) : 3;
-    models[i].drainSpeed        = (c6 > 0) ? constrain(line.substring(c6+1).toInt(), 0, 255) : 127;
+    models[i].drainSpeed        = (c6 > 0) ? constrain(line.substring(c6+1).toInt(), 0, 1000) : 500;
   }
 
   f.close();
@@ -811,7 +818,8 @@ void SaveStationToSD()
   f.println((int)(drainPulsesPerLiter * 10));
   f.println(supplyLowThresholdMl);
   f.println(tankEmptyFlowDropPct);
-  f.println((int)(mlPerMinPerPwm * 100));  // stored x100 to preserve two decimals
+  f.println((int)(mlPerMinPerPwm * 100));
+  f.println((int)(tankEmptyMinRunMs / 1000));  // stored in seconds  // stored x100 to preserve two decimals
 
   f.close();
   Serial.println("SD: station saved");
@@ -864,6 +872,10 @@ void LoadStationFromSD()
   int mlPerMinX100 = line.toInt();
   if (mlPerMinX100 > 0) mlPerMinPerPwm = mlPerMinX100 / 100.0f;
 
+  line = f.readStringUntil('\n');
+  int emptyDelaySecs = line.toInt();
+  if (emptyDelaySecs > 0) tankEmptyMinRunMs = (uint32_t)constrain(emptyDelaySecs, 1, 60) * 1000;
+
   f.close();
   Serial.println("SD: station loaded");
   Serial.print("Supply: ");
@@ -908,17 +920,15 @@ void ShowModelOnSetupPanel(int idx)
   ModelConfig &m = models[idx];
 
   char fillMlBuf[16], drainMlBuf[16];
-  // pumpSpeed and drainSpeed store ml/min directly — display as-is
   snprintf(fillMlBuf,  sizeof(fillMlBuf),  "%d ml/m", m.pumpSpeed);
   snprintf(drainMlBuf, sizeof(drainMlBuf), "%d ml/m", m.drainSpeed);
 
   NxSetText(NX_S_NAME,      m.name);
   NxSetVal(NX_S_TANK_VOL,   m.tankVolumeMl);
   NxSetText(NX_S_SENSOR,    m.hasTankSensor ? "YES" : "NO");
-  { char spdBuf[8]; snprintf(spdBuf, sizeof(spdBuf), "%d", m.pumpSpeed); NxSetText(NX_S_PUMP_SPD, spdBuf); }
+  NxSetText(NX_S_PUMP_SPD,  fillMlBuf);  // Text component shows ml/min directly
   NxSetVal(NX_S_OVERFLOW,   m.overflowPurgeSecs);
-  NxSetVal(NX_S_DRAIN_SPD,  m.drainSpeed);
-  NxSetText("sDrainSpdLbl", drainMlBuf);
+  NxSetText(NX_S_DRAIN_SPD, drainMlBuf);  // Text component shows ml/min directly
   NxSetPic(NX_S_PIC,        m.picIndex);
 }
 
@@ -1046,8 +1056,9 @@ void EnterFillPage()
   NxSetVal(NX_VOLUME_FILL_OBJ,    0);
   NxSetVal(NX_PROGRESS_FILL_OBJ,  0);
   NxSetText(NX_PERCENT_FILL_OBJ,  "0%");
-  NxSetVal(SLIDER_FILL,            models[activeModelIndex].pumpSpeed);
-  { char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", models[activeModelIndex].pumpSpeed); NxSetText(NX_FILL_SPD_LABEL, mlBuf); }
+  { int sliderMlMin = models[activeModelIndex].pumpSpeed;
+    NxSetVal(SLIDER_FILL, sliderMlMin);
+    char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", sliderMlMin); NxSetText(NX_FILL_SPD_LABEL, mlBuf); }
   NxSetText(NX_STOP_REASON_OBJ,   "");
   stopReasonFlashActive = false;
   NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
@@ -1064,15 +1075,13 @@ void EnterFillPage()
 void RefreshFillPage()
 {
   // Resend all current fill page values to Nextion (called on page reload)
-  Serial.print("RefreshFillPage: pumpSpeed=");
-  Serial.println(models[activeModelIndex].pumpSpeed);
-
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
   NxSetPic("mMainPic", models[activeModelIndex].picIndex);
 
   // Restore slider and speed label
-  NxSetVal(SLIDER_FILL, models[activeModelIndex].pumpSpeed);
-  { char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", models[activeModelIndex].pumpSpeed); NxSetText(NX_FILL_SPD_LABEL, mlBuf); }
+  { int sliderMlMin = models[activeModelIndex].pumpSpeed;
+    NxSetVal(SLIDER_FILL, sliderMlMin);
+    char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", sliderMlMin); NxSetText(NX_FILL_SPD_LABEL, mlBuf); }
 
   NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
   NxSetVal(NX_FLOW_RATE_FILL_OBJ, gFillUi.lastSentFlow > 0 ? gFillUi.lastSentFlow : 0);
@@ -1124,7 +1133,7 @@ void EnterDrainPage()
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
   NxSetVal(NX_VOLUME_DRAIN_OBJ,    0);
   NxSetVal(SLIDER_DRAIN,            models[activeModelIndex].drainSpeed);
-  { char mlBuf[16]; FormatMlMin(models[activeModelIndex].drainSpeed, mlBuf, sizeof(mlBuf)); NxSetText(NX_DRAIN_SPD_LABEL, mlBuf); }
+  { char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", models[activeModelIndex].drainSpeed); NxSetText(NX_DRAIN_SPD_LABEL, mlBuf); }
 
   NxSetVal(NX_HELI_BAR_OBJ, 100);
   NxSetText(NX_HELI_PCT_OBJ, "100%");
@@ -1169,7 +1178,7 @@ void EnterSetupPage()
 {
   CurrentPage = SETUPPAGE;
   NxGotoPage(PAGE_SETUP);
-  ShowModelOnSetupPanel(activeModelIndex);
+  // Values refreshed by 4005 Post-init after page loads
 }
 
 void EnterStationPage()
@@ -1185,7 +1194,7 @@ void EnterStationPage()
   NxSetText(NX_ST_DRAIN_STATUS, "Ready - Press Start to begin");
 }
 
-void BeginFill(int mlMin)
+void BeginFill(int pwm)
 {
   if (lowBatteryLatched) return;
 
@@ -1196,7 +1205,9 @@ void BeginFill(int mlMin)
   }
 
   // Initialise closed loop controller
-  closedLoopTargetMlMin = (mlMin > 0) ? mlMin : models[activeModelIndex].pumpSpeed;
+  // Convert PWM to ml/min for closed loop target
+  int pwmToUse = (pwm > 0) ? pwm : (mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].pumpSpeed) : MIN_PWM);
+  closedLoopTargetMlMin = (mlPerMinPerPwm > 0.0f) ? PwmToMlMin(pwmToUse) : 0;
   closedLoopIntegral    = 0.0f;
   closedLoopActive      = true;
 
@@ -1205,10 +1216,8 @@ void BeginFill(int mlMin)
   closedLoopCurrentPwm = MIN_PWM + (int)((estimatedPwm - MIN_PWM) * 0.6f);
   closedLoopPwmFloat   = (float)closedLoopCurrentPwm;  // initialise float accumulator to match
 
-  Serial.println("--- BeginFill ---");
-  Serial.print("mlMin="); Serial.println(closedLoopTargetMlMin);
-  Serial.print("mlPerMinPerPwm="); Serial.println((double)mlPerMinPerPwm);
-  Serial.print("initialPwm="); Serial.println(closedLoopCurrentPwm);
+  Serial.print("BeginFill: target="); Serial.print(closedLoopTargetMlMin);
+  Serial.print("ml/m pwm="); Serial.println(closedLoopCurrentPwm);
 
   PumpDriverEnable();
   PumpEnabled = true;
@@ -1226,7 +1235,7 @@ void BeginDrain(int pwm)
   if (lowBatteryLatched) return;
 
   pwm = constrain(pwm, 0, 255);
-  if (pwm == 0) pwm = models[activeModelIndex].drainSpeed;
+  if (pwm == 0) pwm = (mlPerMinPerPwm > 0.0f) ? MlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM;
   if (pwm < MIN_PWM) pwm = MIN_PWM;
 
   PumpDriverEnable();
@@ -1316,7 +1325,7 @@ void BeginOverflowPurge()
   PumpDriverEnable();
   PumpEnabled = true;
   // Bypass ramp — start at full speed immediately for short purge duration
-  int purgeSpd = models[activeModelIndex].drainSpeed;
+  int purgeSpd = (mlPerMinPerPwm > 0.0f) ? MlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM;
   currentSpeedSigned = -purgeSpd;
   targetSpeedSigned  = -purgeSpd;
   SetPumpOutput(-purgeSpd);
@@ -1386,14 +1395,6 @@ static void UpdateClosedLoop(int actualFlowMlMin)
     closedLoopSettledCount = 0;
   }
 
-  Serial.print("CL: target=");
-  Serial.print(closedLoopTargetMlMin);
-  Serial.print(" actual=");
-  Serial.print(actualFlowMlMin);
-  Serial.print(" err=");
-  Serial.print((double)error);
-  Serial.print(" pwm=");
-  Serial.println(closedLoopCurrentPwm);
 }
 
 static void UpdateFillUiAndStops(uint32_t now)
@@ -1573,7 +1574,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
   }
 
   // Tank empty detection — only when pump running for minimum time
-  if (PumpEnabled && (millis() - drainStartMs) >= TANK_EMPTY_MIN_RUN_MS)
+  if (PumpEnabled && (millis() - drainStartMs) >= tankEmptyMinRunMs)
   {
     // Update peak flow
     if (flow_ml_min > drainPeakFlowMlMin)
@@ -1646,7 +1647,7 @@ void UpdateFlowDisplaysAutoStopAndProgress()
     if (now - autoFillTransitionMs >= 500)  // 500ms delay for Nextion to settle
     {
       autoFillSequence = AF_DRAINING;
-      BeginDrain(models[activeModelIndex].pumpSpeed);
+      BeginDrain(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM);
     }
     return;
   }
@@ -1686,7 +1687,7 @@ void UpdateFlowDisplaysAutoStopAndProgress()
       UpdateSupplyTankUI();
 
       NEXTION.flush();  // discard anything Nextion sent during page transition
-      BeginFill(models[activeModelIndex].pumpSpeed);
+      BeginFill(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].pumpSpeed) : MIN_PWM);
     }
   }
 
@@ -1820,6 +1821,7 @@ void ProcessNextion()
   static bool waitingForSupplyCap    = false;
   static bool waitingForSupplyLow    = false;
   static bool waitingForFlowDrop     = false;
+  static bool waitingForEmptyDelay   = false;
   static bool waitingForFillCalVol   = false;
   static bool waitingForDrainCalVol  = false;
 
@@ -1832,8 +1834,7 @@ void ProcessNextion()
     {
       waitingForTankVol = false;
       models[previewModelIndex].tankVolumeMl = (int)constrain((int32_t)v, 0, 99999);
-      CurrentPage = SETUPPAGE;
-      NxGotoPage(PAGE_SETUP);
+      SaveModelsToSD();
       ShowModelOnSetupPanel(previewModelIndex);
       continue;
     }
@@ -1841,10 +1842,9 @@ void ProcessNextion()
     if (waitingForPumpSpd)
     {
       waitingForPumpSpd = false;
-      Serial.print("waitingForPumpSpd: v="); Serial.println(v);
-      models[previewModelIndex].pumpSpeed = (int)constrain((int32_t)v, 0, 1000);  // ml/min
-      CurrentPage = SETUPPAGE;
-      NxGotoPage(PAGE_SETUP);
+      // Store ml/min directly
+      models[previewModelIndex].pumpSpeed = (int)constrain((int32_t)v, 0, 1000);
+      SaveModelsToSD();
       ShowModelOnSetupPanel(previewModelIndex);
       continue;
     }
@@ -1853,8 +1853,7 @@ void ProcessNextion()
     {
       waitingForSensor = false;
       models[previewModelIndex].hasTankSensor = (v == 1);
-      CurrentPage = SETUPPAGE;
-      NxGotoPage(PAGE_SETUP);
+      SaveModelsToSD();
       ShowModelOnSetupPanel(previewModelIndex);
       continue;
     }
@@ -1863,8 +1862,7 @@ void ProcessNextion()
     {
       waitingForOverflowPurge = false;
       models[previewModelIndex].overflowPurgeSecs = (int)constrain((int32_t)v, 0, 10);
-      CurrentPage = SETUPPAGE;
-      NxGotoPage(PAGE_SETUP);
+      SaveModelsToSD();
       ShowModelOnSetupPanel(previewModelIndex);
       continue;
     }
@@ -1872,9 +1870,9 @@ void ProcessNextion()
     if (waitingForDrainSpeed)
     {
       waitingForDrainSpeed = false;
-      models[previewModelIndex].drainSpeed = (int)constrain((int32_t)v, 0, 255);
-      CurrentPage = SETUPPAGE;
-      NxGotoPage(PAGE_SETUP);
+      // Store ml/min directly
+      models[previewModelIndex].drainSpeed = (int)constrain((int32_t)v, 0, 1000);
+      SaveModelsToSD();
       ShowModelOnSetupPanel(previewModelIndex);
       continue;
     }
@@ -1909,9 +1907,15 @@ void ProcessNextion()
       tankEmptyFlowDropPct = (int)constrain((int32_t)v, 5, 90);
       SaveStationToSD();
       UpdateStationPageValues();
-      Serial.print("Tank empty flow drop: ");
-      Serial.print(tankEmptyFlowDropPct);
-      Serial.println("%");
+      continue;
+    }
+
+    if (waitingForEmptyDelay)
+    {
+      waitingForEmptyDelay = false;
+      tankEmptyMinRunMs = (uint32_t)constrain((int32_t)v, 1, 60) * 1000;
+      SaveStationToSD();
+      UpdateStationPageValues();
       continue;
     }
 
@@ -2057,25 +2061,29 @@ void ProcessNextion()
     if (waitingForSpeed)
     {
       waitingForSpeed = false;
-      int mlMin = (int)constrain((int32_t)v, 0, 2000);
 
-      // Block speed commands during auto drain-then-fill sequence
-      if (autoFillSequence != AF_NONE)
+      // Block speed commands during drain and pending phases
+      if (autoFillSequence == AF_DRAIN_PENDING || autoFillSequence == AF_DRAINING)
       {
         continue;
       }
 
       if (CurrentPage == FILLPAGE)
       {
+        // Fill slider sends ml/min directly (0-1000)
+        int mlMin = (int)constrain((int32_t)v, 0, 1000);
         if (!PumpEnabled && mlMin > 0)
         {
-          BeginFill(mlMin);
+          // Convert ml/min to PWM for BeginFill
+          int pwm = (mlPerMinPerPwm > 0.0f) ? MlMinToPwm(mlMin) : MIN_PWM;
+          BeginFill(pwm);
         }
         else if (PumpEnabled && closedLoopActive)
         {
-          // Update closed loop setpoint
+          // Update closed loop setpoint directly in ml/min
           closedLoopTargetMlMin = mlMin;
-          closedLoopIntegral    = 0.0f;  // reset integral on setpoint change
+          closedLoopIntegral    = 0.0f;
+          closedLoopPwmFloat    = (float)closedLoopCurrentPwm;
         }
         // Update ml/min label
         char mlBuf[16];
@@ -2084,12 +2092,13 @@ void ProcessNextion()
       }
       else if (CurrentPage == DRAINPAGE)
       {
-        int spd = ApplyMinimumFloor(v);
+        // Drain slider sends ml/min (0-1000), convert to PWM
+        int mlMin = (int)constrain((int32_t)v, 0, 1000);
+        int spd = (mlPerMinPerPwm > 0.0f) ? MlMinToPwm(mlMin) : MIN_PWM;
         if (!PumpEnabled && spd > 0) BeginDrain(spd);
         else if (PumpEnabled)        SetTargetSpeed(-spd);
-        // Update ml/min label
         char mlBuf[16];
-        FormatMlMin(spd, mlBuf, sizeof(mlBuf));
+        snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", mlMin);
         NxSetText(NX_DRAIN_SPD_LABEL, mlBuf);
       }
       continue;
@@ -2129,15 +2138,16 @@ void ProcessNextion()
       continue;
     }
 
-    if (v == 11) { if (CurrentPage == FILLPAGE)  BeginFill(models[activeModelIndex].pumpSpeed);  continue; }
-    if (v == 12) { if (CurrentPage == DRAINPAGE) BeginDrain(models[activeModelIndex].drainSpeed); continue; }
+    if (v == 11) { if (CurrentPage == FILLPAGE)  BeginFill(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].pumpSpeed) : MIN_PWM);  continue; }
+    if (v == 12) { if (CurrentPage == DRAINPAGE) BeginDrain(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM); continue; }
 
     if (v == 1000) { waitingForSpeed      = true; continue; }
     if (v == 2000) { waitingForTargetFill = true; continue; }
     if (v == 3000) { waitingForTargetDrain = true; continue; }
 
     // Setup page commands
-    if (v == NX_CMD_SETUP_PAGE) { EnterSetupPage();         continue; }
+    if (v == NX_CMD_SETUP_PAGE)    { EnterSetupPage();                              continue; }
+    if (v == NX_CMD_SETUP_REFRESH) { ShowModelOnSetupPanel(previewModelIndex); continue; }
     if (v == NX_CMD_MODEL1)     { ShowModelOnSetupPanel(0); continue; }
     if (v == NX_CMD_MODEL2)     { ShowModelOnSetupPanel(1); continue; }
     if (v == NX_CMD_MODEL3)     { ShowModelOnSetupPanel(2); continue; }
@@ -2201,7 +2211,8 @@ void ProcessNextion()
 
     if (v == NX_CMD_SET_CAP) { waitingForSupplyCap = true; continue; }
     if (v == NX_CMD_SET_LOW)       { waitingForSupplyLow  = true; continue; }
-    if (v == NX_CMD_SET_FLOW_DROP) { waitingForFlowDrop   = true; continue; }
+    if (v == NX_CMD_SET_FLOW_DROP)   { waitingForFlowDrop   = true; continue; }
+    if (v == NX_CMD_SET_EMPTY_DELAY) { waitingForEmptyDelay = true; continue; }
 
     if (v == NX_CMD_FILL_CAL_START)
     {
@@ -2294,7 +2305,7 @@ void ProcessNextion()
 void setup()
 {
   Serial.begin(115200);
-  while (!Serial && millis() < 3000);  // wait up to 3s for serial monitor
+  delay(200);
 
   Serial.print("\nFuel Pump Controller ");
   Serial.print(FW_VERSION);
