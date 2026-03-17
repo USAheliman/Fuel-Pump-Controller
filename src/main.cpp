@@ -17,6 +17,12 @@
 #define TANK_FULL_ACTIVE_HIGH 1
 
 // ===============================
+// POWER CONTROL
+// ===============================
+#define POWER_BTN_PIN  20   // button input (INPUT_PULLUP, LOW = pressed)
+#define POWER_OFF_PIN  21   // Pololu OFF pin (pulse HIGH to shut down)
+
+// ===============================
 // PUMP DRIVER (BTS7960)
 // ===============================
 #define PUMP_RPWM 7
@@ -200,7 +206,6 @@ int supplyLowThresholdMl   = SUPPLY_LOW_DEFAULT_ML;
 
 // Flash state for low supply warning
 static bool     supplyLowFlash    = false;
-static uint32_t supplyFlashLastMs = 0;
 
 // Flash state for StopReason message (auto sequence status)
 static bool stopReasonFlash       = false;
@@ -314,13 +319,7 @@ static int MlMinToPwm(int mlMin)
   return constrain(pwm, MIN_PWM, MAX_PWM);
 }
 
-static void FormatMlMin(int pwm, char* buf, int bufSize)
-{
-  if (mlPerMinPerPwm <= 0.0f)
-    snprintf(buf, bufSize, "--- ml/m");
-  else
-    snprintf(buf, bufSize, "%d ml/m", PwmToMlMin(pwm));
-}
+
 
 static int DrainPwmToMlMin(int pwm)
 {
@@ -365,6 +364,23 @@ Adafruit_INA219 ina219;
 
 int  cellCount         = 0;
 bool lowBatteryLatched = false;
+
+// ===============================
+// POWER MANAGEMENT
+// ===============================
+#define BTN_DEBOUNCE_MS        50     // debounce time
+#define BTN_LONG_PRESS_MS    3000     // 3s = long press (shutdown)
+#define BTN_SHORT_PRESS_MS    200     // >200ms = intentional short press
+#define SCREEN_STANDBY_MS  300000     // 5 minutes = screen dim
+#define AUTO_SHUTDOWN_MS   900000     // 15 minutes = auto shutdown
+
+static uint32_t btnPressMs       = 0;   // when button was pressed
+static bool     btnWasPressed    = false;
+static bool     screenStandby    = false;
+static uint32_t lastActivityMs   = 0;   // last user interaction
+static bool     shutdownPending  = false;
+
+static void UpdateLastActivity() { lastActivityMs = millis(); }
 
 // ===============================
 // VOLTAGE SAG FILTER
@@ -412,6 +428,8 @@ static inline void ResetFlowUi(FlowUiState &s)
 // ===============================
 static void UpdatePowerUIAndSafety();
 void ProcessNextion();
+static void ExitScreenStandby();
+static void UpdateLastActivity();
 void SetPumpOutput(int signedSpeed);
 void SetTargetSpeed(int signedSpeed);
 void UpdateRamp();
@@ -1944,6 +1962,8 @@ void ProcessNextion()
 
   while (ReadU32(v))
   {
+    UpdateLastActivity();
+    if (screenStandby) ExitScreenStandby();
     // Always check waiting states first
     if (waitingForTankVol)
     {
@@ -2426,6 +2446,121 @@ void ProcessNextion()
 }
 
 // ===============================
+// POWER MANAGEMENT FUNCTIONS
+// ===============================
+static void EnterScreenStandby()
+{
+  screenStandby = true;
+  NxCmd("dim=5");
+}
+
+static void ExitScreenStandby()
+{
+  screenStandby = false;
+  NxCmd("dim=100");
+  lastActivityMs = millis();
+}
+
+static void PerformShutdown()
+{
+  Serial.println("Shutting down...");
+  shutdownPending = true;
+
+  // Stop pump safely
+  StopPumpInPlace();
+
+  // Save everything
+  SaveModelsToSD();
+  SaveStationToSD();
+
+  // Show goodbye message on Nextion
+  CurrentPage = MAINPAGE;
+  NxGotoPage(PAGE_MAIN);
+  NxSetText("tVersion", "Shutting down...");
+  delay(1500);
+
+  // Pulse OFF pin to cut power via Pololu
+  digitalWrite(POWER_OFF_PIN, HIGH);
+  delay(100);
+  digitalWrite(POWER_OFF_PIN, LOW);
+
+  // If still running (e.g. USB powered), just sit here
+  while (true) { delay(100); }
+}
+
+static void UpdatePowerButton()
+{
+  bool btnPressed = (digitalRead(POWER_BTN_PIN) == LOW);
+  uint32_t now = millis();
+
+  if (btnPressed && !btnWasPressed)
+  {
+    // Button just pressed — record time, wait for debounce
+    if (btnPressMs == 0)
+      btnPressMs = now;
+
+    // Confirm press after debounce period
+    if ((now - btnPressMs) >= BTN_DEBOUNCE_MS)
+      btnWasPressed = true;
+  }
+  else if (!btnPressed && btnWasPressed)
+  {
+    // Button released
+    uint32_t pressDuration = now - btnPressMs;
+    btnWasPressed = false;
+    btnPressMs    = 0;
+
+    if (pressDuration >= BTN_LONG_PRESS_MS)
+    {
+      PerformShutdown();
+    }
+    else if (pressDuration >= BTN_SHORT_PRESS_MS)
+    {
+      UpdateLastActivity();
+      if (screenStandby)
+        ExitScreenStandby();
+      else
+        EnterScreenStandby();
+    }
+  }
+  else if (!btnPressed && !btnWasPressed)
+  {
+    btnPressMs = 0;
+  }
+  else if (btnPressed && btnWasPressed)
+  {
+    // Button held — show countdown on long press approaching
+    uint32_t held = now - btnPressMs;
+    if (held >= BTN_LONG_PRESS_MS - 500 && held < BTN_LONG_PRESS_MS)
+    {
+      // Flash screen as warning 500ms before shutdown
+      static bool flashState = false;
+      static uint32_t lastFlash = 0;
+      if (now - lastFlash > 100)
+      {
+        lastFlash = now;
+        flashState = !flashState;
+        NxCmd(flashState ? "dim=100" : "dim=5");
+      }
+    }
+  }
+}
+
+static void UpdateScreenTimeout()
+{
+  if (shutdownPending) return;
+  if (PumpEnabled) { UpdateLastActivity(); return; } // no timeout while pump running
+
+  uint32_t idle = millis() - lastActivityMs;
+
+  if (!screenStandby && idle >= SCREEN_STANDBY_MS)
+    EnterScreenStandby();
+
+  if (idle >= AUTO_SHUTDOWN_MS)
+    PerformShutdown();
+}
+
+// ===============================
 // SETUP / LOOP
 // ===============================
 void setup()
@@ -2457,6 +2592,12 @@ void setup()
 
   PumpDriverDisable();
   InitFlowSensors();
+
+  // Power control pins
+  pinMode(POWER_BTN_PIN, INPUT_PULLUP);
+  pinMode(POWER_OFF_PIN, OUTPUT);
+  digitalWrite(POWER_OFF_PIN, LOW);
+  lastActivityMs = millis();
 
   Wire.begin();
   ina219.begin();
@@ -2494,4 +2635,6 @@ void loop()
   UpdateRamp();
   UpdateFlowDisplaysAutoStopAndProgress();
   UpdatePowerUIAndSafety();
+  UpdatePowerButton();
+  UpdateScreenTimeout();
 }
