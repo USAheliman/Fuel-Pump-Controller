@@ -371,8 +371,9 @@ bool lowBatteryLatched = false;
 #define BTN_DEBOUNCE_MS        50     // debounce time
 #define BTN_LONG_PRESS_MS    3000     // 3s = long press (shutdown)
 #define BTN_SHORT_PRESS_MS    200     // >200ms = intentional short press
-#define SCREEN_STANDBY_MS  300000     // 5 minutes = screen dim
-#define AUTO_SHUTDOWN_MS   900000     // 15 minutes = auto shutdown
+#define SCREEN_STANDBY_MS  120000     // 2 minutes = screen dim
+#define AUTO_SHUTDOWN_MS   300000     // 5 minutes = auto shutdown
+#define BTN_BOOT_SETUP_MS  3000       // hold 3s on boot = go to setup page
 
 static uint32_t btnPressMs       = 0;   // when button was pressed
 static bool     btnWasPressed    = false;
@@ -2519,8 +2520,7 @@ static void UpdatePowerButton()
       UpdateLastActivity();
       if (screenStandby)
         ExitScreenStandby();
-      else
-        EnterScreenStandby();
+      // Short press when awake does nothing — screen times out automatically
     }
   }
   else if (!btnPressed && !btnWasPressed)
@@ -2627,6 +2627,27 @@ void setup()
 
   filterInit = false;
   lowCount   = 0;
+
+  // Detect boot long press — if button still held after 3s go to Setup page
+  if (digitalRead(POWER_BTN_PIN) == LOW)
+  {
+    uint32_t bootHoldStart = millis();
+    NxSetText("tVersion", "Hold for Setup...");
+    while (digitalRead(POWER_BTN_PIN) == LOW)
+    {
+      if (millis() - bootHoldStart >= BTN_BOOT_SETUP_MS)
+      {
+        EnterSetupPage();
+        break;
+      }
+      delay(10);
+    }
+    if (CurrentPage == MAINPAGE)
+    {
+      // Released before 3s — just show normal main page
+      NxSetText("tVersion", FW_VERSION);
+    }
+  }
 }
 
 void loop()
