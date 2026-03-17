@@ -155,7 +155,7 @@ bool PumpEnabled = false;
 #define NX_CMD_DRAIN_CAL_VOL   7021
 
 // Calibration pump speed (fixed)
-#define CAL_PWM 150
+#define CAL_PWM 100  // safe calibration speed with ramp
 
 // Setup page command codes
 #define NX_CMD_OVERFLOW_PURGE 6004
@@ -224,7 +224,8 @@ uint32_t drainCalStartMs     = 0;   // calibration start timestamp
 
 // Flow rate to PWM conversion factor
 // Derived from calibration: ml/min per PWM unit above MIN_PWM
-float mlPerMinPerPwm = 0.0f;  // 0 = not yet calibrated
+float mlPerMinPerPwm      = 0.0f;  // fill: 0 = not yet calibrated
+float drainMlPerMinPerPwm = 0.0f;  // drain: 0 = not yet calibrated
 
 // ===============================
 // AUTO DRAIN-THEN-FILL SEQUENCE
@@ -244,12 +245,22 @@ static uint32_t purgeStartMs = 0;         // timestamp for overflow purge start
 #define CL_KI             0.010f  // integral gain
 #define CL_INTEGRAL_MAX   50.0f   // anti-windup clamp
 
+// Fill closed loop
 bool    closedLoopActive       = false;
 int     closedLoopTargetMlMin  = 0;
 float   closedLoopIntegral     = 0.0f;
-float   closedLoopPwmFloat     = 0.0f;  // float accumulator to avoid rounding errors
+float   closedLoopPwmFloat     = 0.0f;
 int     closedLoopCurrentPwm   = 0;
-uint8_t closedLoopSettledCount  = 0;  // consecutive readings within tolerance
+uint8_t closedLoopSettledCount  = 0;
+
+// Drain closed loop
+bool    drainClosedLoopActive      = false;
+bool    drainClosedLoopHasSettled  = false;  // true once controller has settled at least once
+int     drainClosedLoopTargetMlMin = 0;
+float   drainClosedLoopIntegral    = 0.0f;
+float   drainClosedLoopPwmFloat    = 0.0f;
+int     drainClosedLoopCurrentPwm  = 0;
+uint8_t drainClosedLoopSettledCount = 0;
 #define CL_SETTLED_TOLERANCE  20   // ml/min — within this = settled
 #define CL_SETTLED_COUNT       5   // readings to confirm settled
 
@@ -259,7 +270,7 @@ uint8_t closedLoopSettledCount  = 0;  // consecutive readings within tolerance
 #define TANK_EMPTY_FLOW_DROP_DEFAULT 30  // 30% drop from peak = tank empty
 #define TANK_EMPTY_MIN_RUN_MS_DEFAULT 8000  // default 8s
 uint32_t tankEmptyMinRunMs = TANK_EMPTY_MIN_RUN_MS_DEFAULT;
-#define TANK_EMPTY_CONFIRM_COUNT    2    // consecutive low readings to confirm
+#define TANK_EMPTY_CONFIRM_COUNT    4    // consecutive low readings to confirm
 #define TANK_EMPTY_MIN_PEAK_FLOW    200  // ml/min — if peak never reaches this after min run, tank was already empty
 
 int      tankEmptyFlowDropPct  = TANK_EMPTY_FLOW_DROP_DEFAULT;
@@ -289,7 +300,7 @@ int ApplyMinimumFloor(uint32_t raw)
 // ===============================
 static int PwmToMlMin(int pwm)
 {
-  if (mlPerMinPerPwm <= 0.0f) return 0;  // not calibrated
+  if (mlPerMinPerPwm <= 0.0f) return 0;
   int usable = pwm - MIN_PWM;
   if (usable <= 0) return 0;
   return (int)(usable * mlPerMinPerPwm + 0.5f);
@@ -297,7 +308,7 @@ static int PwmToMlMin(int pwm)
 
 static int MlMinToPwm(int mlMin)
 {
-  if (mlPerMinPerPwm <= 0.0f) return MIN_PWM;  // not calibrated
+  if (mlPerMinPerPwm <= 0.0f) return MIN_PWM;
   if (mlMin <= 0) return 0;
   int pwm = MIN_PWM + (int)((float)mlMin / mlPerMinPerPwm + 0.5f);
   return constrain(pwm, MIN_PWM, MAX_PWM);
@@ -309,6 +320,22 @@ static void FormatMlMin(int pwm, char* buf, int bufSize)
     snprintf(buf, bufSize, "--- ml/m");
   else
     snprintf(buf, bufSize, "%d ml/m", PwmToMlMin(pwm));
+}
+
+static int DrainPwmToMlMin(int pwm)
+{
+  if (drainMlPerMinPerPwm <= 0.0f) return 0;
+  int usable = pwm - MIN_PWM;
+  if (usable <= 0) return 0;
+  return (int)(usable * drainMlPerMinPerPwm + 0.5f);
+}
+
+static int DrainMlMinToPwm(int mlMin)
+{
+  if (drainMlPerMinPerPwm <= 0.0f) return MIN_PWM;
+  if (mlMin <= 0) return 0;
+  int pwm = MIN_PWM + (int)((float)mlMin / drainMlPerMinPerPwm + 0.5f);
+  return constrain(pwm, MIN_PWM, MAX_PWM);
 }
 
 // ===============================
@@ -818,8 +845,9 @@ void SaveStationToSD()
   f.println((int)(drainPulsesPerLiter * 10));
   f.println(supplyLowThresholdMl);
   f.println(tankEmptyFlowDropPct);
-  f.println((int)(mlPerMinPerPwm * 100));
-  f.println((int)(tankEmptyMinRunMs / 1000));  // stored in seconds  // stored x100 to preserve two decimals
+  f.println((int)(mlPerMinPerPwm * 100));       // fill factor x100
+  f.println((int)(drainMlPerMinPerPwm * 100));  // drain factor x100
+  f.println((int)(tankEmptyMinRunMs / 1000));   // stored in seconds
 
   f.close();
   Serial.println("SD: station saved");
@@ -873,6 +901,10 @@ void LoadStationFromSD()
   if (mlPerMinX100 > 0) mlPerMinPerPwm = mlPerMinX100 / 100.0f;
 
   line = f.readStringUntil('\n');
+  int drainMlPerMinX100 = line.toInt();
+  if (drainMlPerMinX100 > 0) drainMlPerMinPerPwm = drainMlPerMinX100 / 100.0f;
+
+  line = f.readStringUntil('\n');
   int emptyDelaySecs = line.toInt();
   if (emptyDelaySecs > 0) tankEmptyMinRunMs = (uint32_t)constrain(emptyDelaySecs, 1, 60) * 1000;
 
@@ -888,6 +920,8 @@ void LoadStationFromSD()
   Serial.println((double)drainPulsesPerLiter);
   Serial.print("mlPerMinPerPwm: ");
   Serial.println((double)mlPerMinPerPwm);
+  Serial.print("drainMlPerMinPerPwm: ");
+  Serial.println((double)drainMlPerMinPerPwm);
 }
 
 // ===============================
@@ -937,11 +971,16 @@ void ShowModelOnSetupPanel(int idx)
 // ===============================
 static void StopPumpInPlace()
 {
-  PumpEnabled              = false;
-  closedLoopActive         = false;
-  closedLoopIntegral       = 0.0f;
-  closedLoopPwmFloat       = 0.0f;
-  closedLoopSettledCount   = 0;
+  PumpEnabled                 = false;
+  closedLoopActive            = false;
+  closedLoopIntegral          = 0.0f;
+  closedLoopPwmFloat          = 0.0f;
+  closedLoopSettledCount      = 0;
+  drainClosedLoopActive       = false;
+  drainClosedLoopIntegral     = 0.0f;
+  drainClosedLoopPwmFloat     = 0.0f;
+  drainClosedLoopSettledCount = 0;
+  drainClosedLoopHasSettled   = false;
   SetTargetSpeed(0);
   SetPumpOutput(0);
   currentSpeedSigned = 0;
@@ -1132,8 +1171,9 @@ void EnterDrainPage()
   NxSetVal(NX_TARGET_DRAIN_OBJ,    targetDrainMl);
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
   NxSetVal(NX_VOLUME_DRAIN_OBJ,    0);
-  NxSetVal(SLIDER_DRAIN,            models[activeModelIndex].drainSpeed);
-  { char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", models[activeModelIndex].drainSpeed); NxSetText(NX_DRAIN_SPD_LABEL, mlBuf); }
+  { int sliderMlMin = models[activeModelIndex].drainSpeed;
+    NxSetVal(SLIDER_DRAIN, sliderMlMin);
+    char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", sliderMlMin); NxSetText(NX_DRAIN_SPD_LABEL, mlBuf); }
 
   NxSetVal(NX_HELI_BAR_OBJ, 100);
   NxSetText(NX_HELI_PCT_OBJ, "100%");
@@ -1211,10 +1251,9 @@ void BeginFill(int pwm)
   closedLoopIntegral    = 0.0f;
   closedLoopActive      = true;
 
-  // Start at 60% of estimated PWM — fast enough without overshoot
-  int estimatedPwm = (mlPerMinPerPwm > 0.0f) ? MlMinToPwm(closedLoopTargetMlMin) : MIN_PWM;
-  closedLoopCurrentPwm = MIN_PWM + (int)((estimatedPwm - MIN_PWM) * 0.6f);
-  closedLoopPwmFloat   = (float)closedLoopCurrentPwm;  // initialise float accumulator to match
+  // Always start from MIN_PWM — closed loop ramps up safely
+  closedLoopCurrentPwm = MIN_PWM;
+  closedLoopPwmFloat   = (float)MIN_PWM;
 
   Serial.print("BeginFill: target="); Serial.print(closedLoopTargetMlMin);
   Serial.print("ml/m pwm="); Serial.println(closedLoopCurrentPwm);
@@ -1234,9 +1273,20 @@ void BeginDrain(int pwm)
 {
   if (lowBatteryLatched) return;
 
-  pwm = constrain(pwm, 0, 255);
-  if (pwm == 0) pwm = (mlPerMinPerPwm > 0.0f) ? MlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM;
-  if (pwm < MIN_PWM) pwm = MIN_PWM;
+  // Initialise drain closed loop
+  drainClosedLoopTargetMlMin  = models[activeModelIndex].drainSpeed;
+  drainClosedLoopIntegral     = 0.0f;
+  drainClosedLoopActive       = true;
+  drainClosedLoopSettledCount = 0;
+  drainClosedLoopHasSettled   = false;
+
+  // Always start from MIN_PWM — closed loop ramps up safely
+  drainClosedLoopCurrentPwm = MIN_PWM;
+  drainClosedLoopPwmFloat   = (float)MIN_PWM;
+
+  // If slider adjustment passed a specific PWM, update setpoint accordingly
+  if (pwm > 0 && pwm != MIN_PWM)
+    drainClosedLoopTargetMlMin = (drainMlPerMinPerPwm > 0.0f) ? DrainPwmToMlMin(pwm) : models[activeModelIndex].drainSpeed;
 
   PumpDriverEnable();
   PumpEnabled = true;
@@ -1251,7 +1301,7 @@ void BeginDrain(int pwm)
   digitalWrite(FILL_RELAY, LOW);
   digitalWrite(DRAIN_RELAY, HIGH);
 
-  SetTargetSpeed(-pwm);
+  SetTargetSpeed(-drainClosedLoopCurrentPwm);
 }
 
 // ===============================
@@ -1325,7 +1375,7 @@ void BeginOverflowPurge()
   PumpDriverEnable();
   PumpEnabled = true;
   // Bypass ramp — start at full speed immediately for short purge duration
-  int purgeSpd = (mlPerMinPerPwm > 0.0f) ? MlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM;
+  int purgeSpd = (drainMlPerMinPerPwm > 0.0f) ? DrainMlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM;
   currentSpeedSigned = -purgeSpd;
   targetSpeedSigned  = -purgeSpd;
   SetPumpOutput(-purgeSpd);
@@ -1395,6 +1445,63 @@ static void UpdateClosedLoop(int actualFlowMlMin)
     closedLoopSettledCount = 0;
   }
 
+}
+
+// ===============================
+// DRAIN CLOSED LOOP FLOW CONTROLLER
+// ===============================
+static void UpdateDrainClosedLoop(int actualFlowMlMin)
+{
+  if (!drainClosedLoopActive || !PumpEnabled) return;
+
+  float error  = (float)(drainClosedLoopTargetMlMin - actualFlowMlMin);
+
+  // Only accumulate integral once flow has started
+  float newIntegral = drainClosedLoopIntegral;
+  if (actualFlowMlMin > 0)
+    newIntegral = constrain(drainClosedLoopIntegral + error, -CL_INTEGRAL_MAX, CL_INTEGRAL_MAX);
+
+  float output = (CL_KP * error) + (CL_KI * newIntegral);
+
+  // Limit ramp rate during zero flow startup
+  if (actualFlowMlMin == 0)
+    output = constrain(output, -3.0f, 3.0f);
+
+  drainClosedLoopPwmFloat += output;
+  drainClosedLoopPwmFloat  = constrain(drainClosedLoopPwmFloat, (float)MIN_PWM, (float)MAX_PWM);
+
+  int newPwm = (int)(drainClosedLoopPwmFloat + 0.5f);
+
+  bool atLimit = (newPwm == MIN_PWM || newPwm == MAX_PWM);
+  if (!atLimit)
+    drainClosedLoopIntegral = newIntegral;
+
+  drainClosedLoopCurrentPwm = newPwm;
+  SetTargetSpeed(-drainClosedLoopCurrentPwm);
+
+  // Self-correct drainMlPerMinPerPwm when settled
+  if (fabs(error) <= CL_SETTLED_TOLERANCE && !atLimit && drainClosedLoopCurrentPwm > MIN_PWM)
+  {
+    drainClosedLoopSettledCount++;
+    if (drainClosedLoopSettledCount >= CL_SETTLED_COUNT)
+    {
+      int usablePwm = drainClosedLoopCurrentPwm - MIN_PWM;
+      if (usablePwm > 0)
+      {
+        float newFactor = (float)actualFlowMlMin / (float)usablePwm;
+        drainMlPerMinPerPwm = drainMlPerMinPerPwm * 0.8f + newFactor * 0.2f;
+        drainClosedLoopSettledCount = 0;
+        drainClosedLoopHasSettled = true;
+        SaveStationToSD();
+        Serial.print("Drain CL: self-corrected drainMlPerMinPerPwm=");
+        Serial.println((double)drainMlPerMinPerPwm);
+      }
+    }
+  }
+  else
+  {
+    drainClosedLoopSettledCount = 0;
+  }
 }
 
 static void UpdateFillUiAndStops(uint32_t now)
@@ -1531,6 +1638,9 @@ static void UpdateDrainUiAndStops(uint32_t now)
 
   lastDrainVolumeMl = volume_ml;
 
+  // Run drain closed loop controller
+  UpdateDrainClosedLoop(flow_ml_min);
+
   if (flow_ml_min != gDrainUi.lastSentFlow)
   {
     gDrainUi.lastSentFlow = flow_ml_min;
@@ -1574,14 +1684,19 @@ static void UpdateDrainUiAndStops(uint32_t now)
   }
 
   // Tank empty detection — only when pump running for minimum time
-  if (PumpEnabled && (millis() - drainStartMs) >= tankEmptyMinRunMs)
+  // Gate: either closed loop has settled, OR PWM is maxed out (tank nearly empty at start)
+  // Always track peak flow regardless of gate
+  if (PumpEnabled && flow_ml_min > drainPeakFlowMlMin)
   {
-    // Update peak flow
-    if (flow_ml_min > drainPeakFlowMlMin)
-    {
-      drainPeakFlowMlMin = flow_ml_min;
-      tankEmptyCount = 0;  // reset counter if flow rises
-    }
+    drainPeakFlowMlMin = flow_ml_min;
+    tankEmptyCount = 0;
+  }
+
+  bool clSettledOrMaxed = !drainClosedLoopActive
+                          || drainClosedLoopHasSettled
+                          || (drainClosedLoopCurrentPwm >= (int)(MAX_PWM * 0.5f));  // 50% of max
+  if (PumpEnabled && (millis() - drainStartMs) >= tankEmptyMinRunMs && clSettledOrMaxed)
+  {
 
     // Tank was already empty — peak flow never reached a meaningful level
     if (drainPeakFlowMlMin < TANK_EMPTY_MIN_PEAK_FLOW)
@@ -1647,7 +1762,7 @@ void UpdateFlowDisplaysAutoStopAndProgress()
     if (now - autoFillTransitionMs >= 500)  // 500ms delay for Nextion to settle
     {
       autoFillSequence = AF_DRAINING;
-      BeginDrain(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM);
+      BeginDrain(drainMlPerMinPerPwm > 0.0f ? DrainMlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM);
     }
     return;
   }
@@ -1979,16 +2094,16 @@ void ProcessNextion()
           float flowAtCalPwm = (actualMl / elapsedSecs) * 60.0f;  // ml/min at CAL_PWM
           int usablePwm = CAL_PWM - MIN_PWM;
           if (usablePwm > 0)
-            mlPerMinPerPwm = flowAtCalPwm / (float)usablePwm;
+            drainMlPerMinPerPwm = flowAtCalPwm / (float)usablePwm;
           Serial.print("Drain cal: flow at CAL_PWM = ");
           Serial.print((double)flowAtCalPwm);
-          Serial.print(" ml/min, mlPerMinPerPwm = ");
-          Serial.println((double)mlPerMinPerPwm);
+          Serial.print(" ml/min, drainMlPerMinPerPwm = ");
+          Serial.println((double)drainMlPerMinPerPwm);
         }
 
         SaveStationToSD();
         char buf[64];
-        snprintf(buf, sizeof(buf), "Done! Pulses/L: %.1f  (~%d ml/m)", (double)drainPulsesPerLiter, PwmToMlMin(CAL_PWM));
+        snprintf(buf, sizeof(buf), "Done! Pulses/L: %.1f  (~%d ml/m)", (double)drainPulsesPerLiter, DrainPwmToMlMin(CAL_PWM));
         NxSetText(NX_ST_DRAIN_STATUS, buf);
         UpdateStationPageValues();
       }
@@ -2092,11 +2207,20 @@ void ProcessNextion()
       }
       else if (CurrentPage == DRAINPAGE)
       {
-        // Drain slider sends ml/min (0-1000), convert to PWM
+        // Drain slider sends ml/min (0-1000)
         int mlMin = (int)constrain((int32_t)v, 0, 1000);
-        int spd = (mlPerMinPerPwm > 0.0f) ? MlMinToPwm(mlMin) : MIN_PWM;
-        if (!PumpEnabled && spd > 0) BeginDrain(spd);
-        else if (PumpEnabled)        SetTargetSpeed(-spd);
+        int spd = (drainMlPerMinPerPwm > 0.0f) ? DrainMlMinToPwm(mlMin) : MIN_PWM;
+        if (!PumpEnabled && spd > 0)
+        {
+          BeginDrain(spd);
+        }
+        else if (PumpEnabled && drainClosedLoopActive)
+        {
+          // Update drain closed loop setpoint
+          drainClosedLoopTargetMlMin = mlMin;
+          drainClosedLoopIntegral    = 0.0f;
+          drainClosedLoopPwmFloat    = (float)drainClosedLoopCurrentPwm;
+        }
         char mlBuf[16];
         snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", mlMin);
         NxSetText(NX_DRAIN_SPD_LABEL, mlBuf);
@@ -2139,7 +2263,7 @@ void ProcessNextion()
     }
 
     if (v == 11) { if (CurrentPage == FILLPAGE)  BeginFill(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].pumpSpeed) : MIN_PWM);  continue; }
-    if (v == 12) { if (CurrentPage == DRAINPAGE) BeginDrain(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM); continue; }
+    if (v == 12) { if (CurrentPage == DRAINPAGE) BeginDrain(drainMlPerMinPerPwm > 0.0f ? DrainMlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM); continue; }
 
     if (v == 1000) { waitingForSpeed      = true; continue; }
     if (v == 2000) { waitingForTargetFill = true; continue; }
@@ -2223,10 +2347,11 @@ void ProcessNextion()
       }
       noInterrupts(); fillPulses = 0; interrupts();
       fillCalActive  = true;
-      fillCalStartMs = millis();
+      fillCalStartMs = millis() + (uint32_t)((CAL_PWM - MIN_PWM) * RAMP_INTERVAL_MS);  // offset for ramp time
 
       PumpDriverEnable();
       PumpEnabled = true;
+      currentSpeedSigned = 0;  // ensure ramp starts from 0
       digitalWrite(FILL_RELAY, HIGH);
       digitalWrite(DRAIN_RELAY, LOW);
       SetTargetSpeed(+CAL_PWM);
@@ -2263,10 +2388,11 @@ void ProcessNextion()
       }
       noInterrupts(); drainPulses = 0; interrupts();
       drainCalActive  = true;
-      drainCalStartMs = millis();
+      drainCalStartMs = millis() + (uint32_t)((CAL_PWM - MIN_PWM) * RAMP_INTERVAL_MS);  // offset for ramp time
 
       PumpDriverEnable();
       PumpEnabled = true;
+      currentSpeedSigned = 0;  // ensure ramp starts from 0
       digitalWrite(FILL_RELAY, LOW);
       digitalWrite(DRAIN_RELAY, HIGH);
       SetTargetSpeed(-CAL_PWM);
