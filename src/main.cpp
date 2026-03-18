@@ -157,6 +157,7 @@ bool PumpEnabled = false;
 #define NX_CMD_SET_LOW         7012
 #define NX_CMD_SET_FLOW_DROP   7013
 #define NX_CMD_SET_EMPTY_DELAY 7014
+#define NX_CMD_VOLUME          7015
 #define NX_CMD_FILL_CAL_VOL    7020
 #define NX_CMD_DRAIN_CAL_VOL   7021
 
@@ -275,6 +276,7 @@ uint8_t drainClosedLoopSettledCount = 0;
 #define TANK_EMPTY_FLOW_DROP_DEFAULT 30  // 30% drop from peak = tank empty
 #define TANK_EMPTY_MIN_RUN_MS_DEFAULT 8000  // default 8s
 uint32_t tankEmptyMinRunMs = TANK_EMPTY_MIN_RUN_MS_DEFAULT;
+int      nexionVolume      = 50;   // default 50%
 #define TANK_EMPTY_CONFIRM_COUNT    4    // consecutive low readings to confirm
 #define TANK_EMPTY_MIN_PEAK_FLOW    200  // ml/min — if peak never reaches this after min run, tank was already empty
 
@@ -744,6 +746,9 @@ static void UpdateStationPageValues()
   snprintf(buf, sizeof(buf), "%ds", (int)(tankEmptyMinRunMs / 1000));
   NxSetText(NX_ST_EMPTY_DELAY_VAL, buf);
 
+  snprintf(buf, sizeof(buf), "%d%%", nexionVolume);
+  NxSetText("tVolume", buf);
+
   snprintf(buf, sizeof(buf), "%.1f", (double)fillPulsesPerLiter);
   NxSetText(NX_ST_FILL_PULSE_VAL, buf);
 
@@ -867,6 +872,7 @@ void SaveStationToSD()
   f.println((int)(mlPerMinPerPwm * 100));       // fill factor x100
   f.println((int)(drainMlPerMinPerPwm * 100));  // drain factor x100
   f.println((int)(tankEmptyMinRunMs / 1000));   // stored in seconds
+  f.println(nexionVolume);                       // speaker volume 0-100
 
   f.close();
   Serial.println("SD: station saved");
@@ -926,6 +932,10 @@ void LoadStationFromSD()
   line = f.readStringUntil('\n');
   int emptyDelaySecs = line.toInt();
   if (emptyDelaySecs > 0) tankEmptyMinRunMs = (uint32_t)constrain(emptyDelaySecs, 1, 60) * 1000;
+
+  line = f.readStringUntil('\n');
+  int vol = line.toInt();
+  if (vol >= 0) nexionVolume = constrain(vol, 0, 100);
 
   f.close();
   Serial.println("SD: station loaded");
@@ -1956,6 +1966,7 @@ void ProcessNextion()
   static bool waitingForSupplyLow    = false;
   static bool waitingForFlowDrop     = false;
   static bool waitingForEmptyDelay   = false;
+  static bool waitingForVolume       = false;
   static bool waitingForFillCalVol   = false;
   static bool waitingForDrainCalVol  = false;
 
@@ -2050,6 +2061,21 @@ void ProcessNextion()
     {
       waitingForEmptyDelay = false;
       tankEmptyMinRunMs = (uint32_t)constrain((int32_t)v, 1, 60) * 1000;
+      SaveStationToSD();
+      UpdateStationPageValues();
+      continue;
+    }
+
+    if (waitingForVolume)
+    {
+      waitingForVolume = false;
+      if (v == 1)
+        nexionVolume = constrain(nexionVolume + 10, 0, 100);
+      else
+        nexionVolume = constrain(nexionVolume - 10, 0, 100);
+      char volCmd[20];
+      snprintf(volCmd, sizeof(volCmd), "volume=%d", nexionVolume);
+      NxCmd(volCmd);
       SaveStationToSD();
       UpdateStationPageValues();
       continue;
@@ -2358,6 +2384,7 @@ void ProcessNextion()
     if (v == NX_CMD_SET_LOW)       { waitingForSupplyLow  = true; continue; }
     if (v == NX_CMD_SET_FLOW_DROP)   { waitingForFlowDrop   = true; continue; }
     if (v == NX_CMD_SET_EMPTY_DELAY) { waitingForEmptyDelay = true; continue; }
+    if (v == NX_CMD_VOLUME) { waitingForVolume = true; continue; }
 
     if (v == NX_CMD_FILL_CAL_START)
     {
@@ -2474,9 +2501,10 @@ static void PerformShutdown()
   SaveModelsToSD();
   SaveStationToSD();
 
-  // Show goodbye message on Nextion
-  CurrentPage = MAINPAGE;
-  NxGotoPage(PAGE_MAIN);
+  // Show goodbye message and play shutdown sound on current page
+  // Don't navigate to MainPage — avoids triggering startup sound in Post-init
+  NxCmd("wav0.en=0");          // stop any playing sound
+  NxCmd("wav1.en=1");          // play shutdown sound
   NxSetText("tVersion", "Shutting down...");
   delay(1500);
 
@@ -2520,30 +2548,15 @@ static void UpdatePowerButton()
       UpdateLastActivity();
       if (screenStandby)
         ExitScreenStandby();
-      // Short press when awake does nothing — screen times out automatically
+      else
+        EnterScreenStandby();
     }
   }
   else if (!btnPressed && !btnWasPressed)
   {
     btnPressMs = 0;
   }
-  else if (btnPressed && btnWasPressed)
-  {
-    // Button held — show countdown on long press approaching
-    uint32_t held = now - btnPressMs;
-    if (held >= BTN_LONG_PRESS_MS - 500 && held < BTN_LONG_PRESS_MS)
-    {
-      // Flash screen as warning 500ms before shutdown
-      static bool flashState = false;
-      static uint32_t lastFlash = 0;
-      if (now - lastFlash > 100)
-      {
-        lastFlash = now;
-        flashState = !flashState;
-        NxCmd(flashState ? "dim=100" : "dim=5");
-      }
-    }
-  }
+
 }
 
 static void UpdateScreenTimeout()
@@ -2607,6 +2620,10 @@ void setup()
   ApplyActiveModel();
 
   NEXTION.begin(NEXTION_BAUD);
+  delay(1500);  // wait for Nextion to fully boot before sending volume
+  char volCmd[20];
+  snprintf(volCmd, sizeof(volCmd), "volume=%d", nexionVolume);
+  NxCmd(volCmd);
 
   PumpEnabled        = false;
   currentSpeedSigned = 0;
