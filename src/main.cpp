@@ -592,6 +592,15 @@ static bool IsTankFull()
   int raw = digitalRead(TANK_FULL_PIN);
   bool active = (TANK_FULL_ACTIVE_HIGH ? (raw == HIGH) : (raw == LOW));
 
+  // DEBUG — print sensor state every 2 seconds
+  static uint32_t lastDebugMs = 0;
+  if (millis() - lastDebugMs > 2000)
+  {
+    lastDebugMs = millis();
+    Serial.print("TankFull: raw="); Serial.print(raw);
+    Serial.print(" active="); Serial.println(active);
+  }
+
   static uint8_t activeCount = 0;
   if (active) { if (activeCount < 255) activeCount++; }
   else          activeCount = 0;
@@ -2479,6 +2488,7 @@ void ProcessNextion()
 static void EnterScreenStandby()
 {
   screenStandby = true;
+  NxCmd("wav1.en=1");  // play shutdown sound
   NxCmd("dim=5");
 }
 
@@ -2486,6 +2496,7 @@ static void ExitScreenStandby()
 {
   screenStandby = false;
   NxCmd("dim=100");
+  NxCmd("wav0.en=1");  // play startup sound
   lastActivityMs = millis();
 }
 
@@ -2507,6 +2518,14 @@ static void PerformShutdown()
   NxCmd("wav1.en=1");          // play shutdown sound
   NxSetText("tVersion", "Shutting down...");
   delay(1500);
+
+  // Blank the screen
+  NxCmd("dim=0");
+
+  // Wait for button to be released before pulsing OFF
+  // Otherwise Pololu sees button still held and fights the OFF signal
+  while (digitalRead(POWER_BTN_PIN) == LOW) { delay(10); }
+  delay(100);  // small settling delay
 
   // Pulse OFF pin to cut power via Pololu
   digitalWrite(POWER_OFF_PIN, HIGH);
@@ -2532,18 +2551,20 @@ static void UpdatePowerButton()
     if ((now - btnPressMs) >= BTN_DEBOUNCE_MS)
       btnWasPressed = true;
   }
+  else if (btnPressed && btnWasPressed)
+  {
+    // Button held — trigger shutdown immediately at 3s without waiting for release
+    if ((now - btnPressMs) >= BTN_LONG_PRESS_MS)
+      PerformShutdown();
+  }
   else if (!btnPressed && btnWasPressed)
   {
-    // Button released
+    // Button released before long press threshold
     uint32_t pressDuration = now - btnPressMs;
     btnWasPressed = false;
     btnPressMs    = 0;
 
-    if (pressDuration >= BTN_LONG_PRESS_MS)
-    {
-      PerformShutdown();
-    }
-    else if (pressDuration >= BTN_SHORT_PRESS_MS)
+    if (pressDuration >= BTN_SHORT_PRESS_MS)
     {
       UpdateLastActivity();
       if (screenStandby)
@@ -2624,6 +2645,8 @@ void setup()
   char volCmd[20];
   snprintf(volCmd, sizeof(volCmd), "volume=%d", nexionVolume);
   NxCmd(volCmd);
+  delay(50);           // short pause to ensure volume is applied
+  NxCmd("wav0.en=1"); // play startup sound at correct volume
 
   PumpEnabled        = false;
   currentSpeedSigned = 0;
