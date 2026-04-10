@@ -34,8 +34,10 @@
 // SD CARD
 // ===============================
 #define SD_CS_PIN    BUILTIN_SDCARD
-#define CONFIG_FILE  "/models.cfg"
-#define STATION_FILE "/station.cfg"
+#define CONFIG_FILE       "/models.cfg"    // legacy — kept for active model index
+#define STATION_FILE      "/station.cfg"
+#define MODELS_INDEX_FILE "/models/index.txt"
+#define MODELS_FOLDER     "/models"
 
 // ===============================
 // NEXTION
@@ -85,13 +87,6 @@
 #define NX_LB_CELLS_TXT "LbCells"
 
 // Setup page objects
-#define NX_S_NAME     "sName"
-#define NX_S_PIC      "sPic"
-#define NX_S_TANK_VOL "sTankVol"
-#define NX_S_SENSOR   "sSensor"
-#define NX_S_PUMP_SPD "sPumpSpd"
-#define NX_S_OVERFLOW   "sOverflow"
-#define NX_S_DRAIN_SPD  "sDrainSpd"
 
 // Speed label objects (show ml/min next to sliders)
 #define NX_FILL_SPD_LABEL "t0"  // on FillPage
@@ -125,26 +120,27 @@
 #define LOWBATTPAGE 3
 #define SETUPPAGE   4
 #define STATIONPAGE 5
+#define KEYBDPAGE   6
 
 uint8_t CurrentPage = MAINPAGE;
+uint8_t previousPage = MAINPAGE;
+bool    modelUpdatePending = false;
+uint32_t modelUpdatePendingMs = 0;
 bool PumpEnabled = false;
 
 #define NX_PAGE_REPORT_MAIN   5001
 #define NX_PAGE_REPORT_FILL   5002
 #define NX_PAGE_REPORT_DRAIN  5003
-#define NX_PAGE_REPORT_LOWBAT 5004
+#define NX_PAGE_REPORT_LOWBAT  5004
+#define NX_PAGE_REPORT_SETUP   5007  // SetupPage loaded
+#define NX_PAGE_REPORT_KEYBD   5008  // Keyboard page loaded
+#define NX_CMD_MODEL_SELECTED  8020  // user selected model in TextSelect (next val = index)
 
 // Setup page command codes
 #define NX_CMD_SETUP_PAGE  4000
-#define NX_CMD_SETUP_REFRESH 4005  // Post-init refresh — does not navigate
-#define NX_CMD_MODEL1      4001
-#define NX_CMD_MODEL2      4002
-#define NX_CMD_MODEL3      4003
-#define NX_CMD_MODEL4      4004
-#define NX_CMD_SELECT      4010
-#define NX_CMD_SAVE        4011
-#define NX_CMD_BACK_SETUP  4020
 #define NX_CMD_STATION     4030
+#define NX_CMD_SELECT      4010  // Make previewed model active
+#define NX_CMD_BACK_SETUP  4020  // Back from SetupPage to MainPage
 
 // Station page command codes
 #define NX_CMD_BACK_STATION    7000
@@ -158,6 +154,21 @@ bool PumpEnabled = false;
 #define NX_CMD_SET_FLOW_DROP   7013
 #define NX_CMD_SET_EMPTY_DELAY 7014
 #define NX_CMD_VOLUME          7015
+
+// ===============================
+// SD SYNC PROTOCOL (Nextion -> Teensy)
+// ===============================
+#define NX_CMD_SD_INDEX_SIZE   8000  // Nextion sending: file size of index.txt (next val = size in bytes)
+#define NX_CMD_SD_INDEX_DATA   8001  // Nextion sending: raw index.txt bytes follow (next val = byte count)
+#define NX_CMD_SD_MODEL_START  8002  // Nextion sending: start of model config (next val = model number 0-based)
+#define NX_CMD_SD_MODEL_VOL    8003  // Nextion sending: tankVolumeMl
+#define NX_CMD_SD_MODEL_SENSOR 8004  // Nextion sending: hasTankSensor (0/1)
+#define NX_CMD_SD_MODEL_FILL   8005  // Nextion sending: fillSpeed ml/min
+#define NX_CMD_SD_MODEL_DRAIN  8006  // Nextion sending: drainSpeed ml/min
+#define NX_CMD_SD_MODEL_PURGE  8007  // Nextion sending: overflowPurgeSecs
+#define NX_CMD_SD_MODEL_END    8008  // Nextion sending: end of model config
+#define NX_CMD_SD_SYNC_DONE    8009  // Nextion sending: all models sent, sync complete
+#define NX_CMD_SD_MODEL_NAME   8010  // Nextion sending: model name follows as string bytes
 #define NX_CMD_FILL_CAL_VOL    7020
 #define NX_CMD_DRAIN_CAL_VOL   7021
 
@@ -171,7 +182,8 @@ bool PumpEnabled = false;
 // ===============================
 // MODEL CONFIGURATION
 // ===============================
-#define NUM_MODELS 4
+#define MAX_MODELS   20
+#define NUM_MODELS_DEFAULT 4
 
 struct ModelConfig
 {
@@ -179,20 +191,30 @@ struct ModelConfig
   int     tankVolumeMl;
   bool    hasTankSensor;
   int     pumpSpeed;         // fill speed (ml/min)
-  uint8_t picIndex;
+  uint8_t picIndex;          // legacy - kept for compatibility
   int     overflowPurgeSecs; // 0 = skip purge, 1-10 seconds
   int     drainSpeed;        // drain speed (ml/min)
 };
 
-ModelConfig models[NUM_MODELS] = {
-  { "BO 105",   2000, true,  500, 3, 3, 500 },
-  { "Whiplash", 1000, false, 500, 5, 3, 500 },
-  { "Alouette", 1500, true,  500, 2, 3, 500 },
-  { "EC 145",   3000, true,  500, 4, 3, 500 },
-};
+ModelConfig models[MAX_MODELS];
+int numModels = 0;  // actual number of models loaded
 
 int activeModelIndex  = 0;
 int previewModelIndex = 0;
+
+// ===============================
+// MODEL DEFAULTS (used if SD load fails)
+// ===============================
+static void LoadDefaultModels()
+{
+  numModels = 4;
+  models[0] = { "BO 105",   2000, true,  500, 0, 3, 500 };
+  models[1] = { "Whiplash", 1000, false, 500, 0, 3, 500 };
+  models[2] = { "Alouette", 1500, true,  500, 0, 3, 500 };
+  models[3] = { "EC 145",   3000, true,  500, 0, 3, 500 };
+  activeModelIndex = 0;
+  Serial.println("SD: using default models");
+}
 
 // ===============================
 // SUPPLY TANK
@@ -431,6 +453,8 @@ static inline void ResetFlowUi(FlowUiState &s)
 // ===============================
 static void UpdatePowerUIAndSafety();
 void ProcessNextion();
+static void SendModelToSetupPage(int idx);
+static void BuildAndSendModelList();
 static void ExitScreenStandby();
 static void UpdateLastActivity();
 void SetPumpOutput(int signedSpeed);
@@ -441,7 +465,6 @@ void EnterFillPage();
 void EnterDrainPage();
 void RefreshFillPage();
 void RefreshDrainPage();
-void EnterSetupPage();
 void EnterStationPage();
 void BeginFill(int pwm);
 void BeginDrain(int pwm);
@@ -454,7 +477,6 @@ void SaveModelsToSD();
 void LoadModelsFromSD();
 void SaveStationToSD();
 void LoadStationFromSD();
-void ShowModelOnSetupPanel(int idx);
 void ApplyActiveModel();
 void UpdateMainPageModel();
 static void UpdateSupplyTankUI();
@@ -495,13 +517,6 @@ static void NxSetText(const char* objName, const char* txt)
 {
   char buf[128];
   snprintf(buf, sizeof(buf), "%s.txt=\"%s\"", objName, txt);
-  NxCmd(buf);
-}
-
-static void NxSetPic(const char* objName, int picIndex)
-{
-  char buf[72];
-  snprintf(buf, sizeof(buf), "%s.pic=%d", objName, picIndex);
   NxCmd(buf);
 }
 
@@ -770,87 +785,146 @@ static void UpdateStationPageValues()
 // ===============================
 void SaveModelsToSD()
 {
-  if (!SD.begin(SD_CS_PIN))
-  {
-    Serial.println("SD: save failed - card not found");
-    return;
-  }
-
+  // Save active model index
   SD.remove(CONFIG_FILE);
-  File f = SD.open(CONFIG_FILE, FILE_WRITE);
-  if (!f)
+  File fidx = SD.open(CONFIG_FILE, FILE_WRITE);
+  if (fidx) { fidx.println(activeModelIndex); fidx.close(); }
+
+  // Save each model to its own config.txt
+  for (int i = 0; i < numModels; i++)
   {
-    Serial.println("SD: could not open file for writing");
-    return;
+    char path[64];
+    snprintf(path, sizeof(path), "/models/%s/config.txt", models[i].name);
+    SD.remove(path);
+    File f = SD.open(path, FILE_WRITE);
+    if (!f) { Serial.print("SD: could not write "); Serial.println(path); continue; }
+    f.print("tankVolume=");    f.println(models[i].tankVolumeMl);
+    f.print("hasSensor=");     f.println(models[i].hasTankSensor ? 1 : 0);
+    f.print("fillSpeed=");     f.println(models[i].pumpSpeed);
+    f.print("drainSpeed=");    f.println(models[i].drainSpeed);
+    f.print("overflowPurge="); f.println(models[i].overflowPurgeSecs);
+    f.close();
   }
-
-  f.println(activeModelIndex);
-
-  for (int i = 0; i < NUM_MODELS; i++)
-  {
-    f.print(models[i].name);                   f.print(',');
-    f.print(models[i].tankVolumeMl);           f.print(',');
-    f.print(models[i].hasTankSensor ? 1 : 0);  f.print(',');
-    f.print(models[i].pumpSpeed);              f.print(',');
-    f.print(models[i].picIndex);               f.print(',');
-    f.print(models[i].overflowPurgeSecs);         f.print(',');
-    f.println(models[i].drainSpeed);
-  }
-
-  f.close();
   Serial.println("SD: models saved");
+}
+
+static void SaveOneModelToSD(int idx)
+{
+  if (idx < 0 || idx >= numModels) return;
+  char path[64];
+  snprintf(path, sizeof(path), "/models/%s/config.txt", models[idx].name);
+  SD.remove(path);
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) { Serial.print("SD: could not write "); Serial.println(path); return; }
+  f.print("tankVolume=");    f.println(models[idx].tankVolumeMl);
+  f.print("hasSensor=");     f.println(models[idx].hasTankSensor ? 1 : 0);
+  f.print("fillSpeed=");     f.println(models[idx].pumpSpeed);
+  f.print("drainSpeed=");    f.println(models[idx].drainSpeed);
+  f.print("overflowPurge="); f.println(models[idx].overflowPurgeSecs);
+  f.close();
+}
+
+// Parse one key=value line from config.txt
+static int ParseConfigValue(const String &line)
+{
+  int eq = line.indexOf('=');
+  if (eq < 0) return 0;
+  return line.substring(eq + 1).toInt();
 }
 
 void LoadModelsFromSD()
 {
   if (!SD.begin(SD_CS_PIN))
   {
-    Serial.println("SD: load failed - using defaults");
+    LoadDefaultModels();
     return;
   }
 
-  if (!SD.exists(CONFIG_FILE))
+  // Read index.txt to get model names
+  if (!SD.exists(MODELS_INDEX_FILE))
   {
-    Serial.println("SD: no config file - using defaults");
+    Serial.println("SD: no index.txt - using defaults");
+    LoadDefaultModels();
     return;
   }
 
-  File f = SD.open(CONFIG_FILE, FILE_READ);
-  if (!f)
+  File idx = SD.open(MODELS_INDEX_FILE, FILE_READ);
+  if (!idx)
   {
-    Serial.println("SD: could not open config - using defaults");
+    LoadDefaultModels();
     return;
   }
 
-  String line = f.readStringUntil('\n');
-  activeModelIndex = constrain(line.toInt(), 0, NUM_MODELS - 1);
-
-  for (int i = 0; i < NUM_MODELS; i++)
+  numModels = 0;
+  while (idx.available() && numModels < MAX_MODELS)
   {
-    line = f.readStringUntil('\n');
-    line.trim();
+    String name = idx.readStringUntil('\n');
+    name.trim();
+    if (name.length() == 0) continue;
+    name.toCharArray(models[numModels].name, sizeof(models[numModels].name));
 
-    int c1 = line.indexOf(',');
-    int c2 = line.indexOf(',', c1 + 1);
-    int c3 = line.indexOf(',', c2 + 1);
-    int c4 = line.indexOf(',', c3 + 1);
-    int c5 = line.indexOf(',', c4 + 1);
+    // Set defaults for this model
+    models[numModels].tankVolumeMl      = 2000;
+    models[numModels].hasTankSensor     = false;
+    models[numModels].pumpSpeed         = 500;
+    models[numModels].drainSpeed        = 500;
+    models[numModels].overflowPurgeSecs = 3;
+    models[numModels].picIndex          = 0;
 
-    if (c1 < 0 || c2 < 0 || c3 < 0 || c4 < 0) continue;
+    // Load config.txt for this model
+    char path[48];
+    snprintf(path, sizeof(path), "/models/%s/config.txt", models[numModels].name);
+    if (SD.exists(path))
+    {
+      File cfg = SD.open(path, FILE_READ);
+      if (cfg)
+      {
+        while (cfg.available())
+        {
+          String line = cfg.readStringUntil('\n');
+          line.trim();
+          if (line.startsWith("tankVolume="))
+            models[numModels].tankVolumeMl = ParseConfigValue(line);
+          else if (line.startsWith("hasSensor="))
+            models[numModels].hasTankSensor = ParseConfigValue(line) == 1;
+          else if (line.startsWith("fillSpeed="))
+            models[numModels].pumpSpeed = constrain(ParseConfigValue(line), 0, 1000);
+          else if (line.startsWith("drainSpeed="))
+            models[numModels].drainSpeed = constrain(ParseConfigValue(line), 0, 1000);
+          else if (line.startsWith("overflowPurge="))
+            models[numModels].overflowPurgeSecs = constrain(ParseConfigValue(line), 0, 10);
+        }
+        cfg.close();
+      }
+    }
 
-    String name = line.substring(0, c1);
-    name.toCharArray(models[i].name, sizeof(models[i].name));
-    models[i].tankVolumeMl     = line.substring(c1+1, c2).toInt();
-    models[i].hasTankSensor    = line.substring(c2+1, c3).toInt() == 1;
-    models[i].pumpSpeed        = line.substring(c3+1, c4).toInt();
-    int c6 = line.indexOf(',', c5 + 1);
-    models[i].picIndex          = (uint8_t)(c5 > 0 ? line.substring(c4+1, c5).toInt() : line.substring(c4+1).toInt());
-    models[i].overflowPurgeSecs = (c5 > 0) ? constrain(line.substring(c5+1, c6 > 0 ? c6 : line.length()).toInt(), 0, 10) : 3;
-    models[i].drainSpeed        = (c6 > 0) ? constrain(line.substring(c6+1).toInt(), 0, 1000) : 500;
+    Serial.print("SD: loaded model "); Serial.println(models[numModels].name);
+    numModels++;
+  }
+  idx.close();
+
+  if (numModels == 0)
+  {
+    Serial.println("SD: no models found - using defaults");
+    LoadDefaultModels();
+    return;
   }
 
-  f.close();
-  Serial.println("SD: models loaded");
+  // Load active model index from legacy file
+  activeModelIndex = 0;
+  if (SD.exists(CONFIG_FILE))
+  {
+    File f = SD.open(CONFIG_FILE, FILE_READ);
+    if (f)
+    {
+      String line = f.readStringUntil('\n');
+      activeModelIndex = constrain(line.toInt(), 0, numModels - 1);
+      f.close();
+    }
+  }
+
+  Serial.print("SD: models loaded: "); Serial.print(numModels);
+  Serial.print(" active: "); Serial.println(activeModelIndex);
 }
 
 // ===============================
@@ -975,35 +1049,22 @@ void ApplyActiveModel()
 // ===============================
 // UPDATE MAIN PAGE MODEL
 // ===============================
+static void NxSetModelImage(const char* modelName)
+{
+  char imgCmd[72];
+  snprintf(imgCmd, sizeof(imgCmd), "exp0.path=\"sd0/models/%s/%s.jpg\"", modelName, modelName);
+  NxCmd(imgCmd);
+}
+
 void UpdateMainPageModel()
 {
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+  NxSetModelImage(models[activeModelIndex].name);
 }
 
 // ===============================
 // SETUP PAGE — SHOW MODEL IN PANEL
 // ===============================
-void ShowModelOnSetupPanel(int idx)
-{
-  if (idx < 0 || idx >= NUM_MODELS) return;
-  previewModelIndex = idx;
-
-  ModelConfig &m = models[idx];
-
-  char fillMlBuf[16], drainMlBuf[16];
-  snprintf(fillMlBuf,  sizeof(fillMlBuf),  "%d ml/m", m.pumpSpeed);
-  snprintf(drainMlBuf, sizeof(drainMlBuf), "%d ml/m", m.drainSpeed);
-
-  NxSetText(NX_S_NAME,      m.name);
-  NxSetVal(NX_S_TANK_VOL,   m.tankVolumeMl);
-  NxSetText(NX_S_SENSOR,    m.hasTankSensor ? "YES" : "NO");
-  NxSetText(NX_S_PUMP_SPD,  fillMlBuf);  // Text component shows ml/min directly
-  NxSetVal(NX_S_OVERFLOW,   m.overflowPurgeSecs);
-  NxSetText(NX_S_DRAIN_SPD, drainMlBuf);  // Text component shows ml/min directly
-  NxSetPic(NX_S_PIC,        m.picIndex);
-}
-
 // ===============================
 // PUMP STOP IN PLACE
 // ===============================
@@ -1126,7 +1187,7 @@ void EnterFillPage()
   NxGotoPage(PAGE_FILL);
 
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+  NxSetModelImage(models[activeModelIndex].name);
 
   NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
   NxSetVal(NX_FLOW_RATE_FILL_OBJ, 0);
@@ -1153,7 +1214,7 @@ void RefreshFillPage()
 {
   // Resend all current fill page values to Nextion (called on page reload)
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+  NxSetModelImage(models[activeModelIndex].name);
 
   // Restore slider and speed label
   { int sliderMlMin = models[activeModelIndex].pumpSpeed;
@@ -1204,7 +1265,7 @@ void EnterDrainPage()
   NxGotoPage(PAGE_DRAIN);
 
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+  NxSetModelImage(models[activeModelIndex].name);
 
   NxSetVal(NX_TARGET_DRAIN_OBJ,    targetDrainMl);
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
@@ -1227,7 +1288,7 @@ void RefreshDrainPage()
 {
   // Resend all current drain page values to Nextion (called on page reload)
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+  NxSetModelImage(models[activeModelIndex].name);
 
   int drainRef = (targetDrainMl > 0) ? targetDrainMl : models[activeModelIndex].tankVolumeMl;
   NxSetVal(NX_TARGET_DRAIN_OBJ,    drainRef);
@@ -1250,13 +1311,6 @@ void RefreshDrainPage()
 
   UpdateSupplyTankUI();
   UpdateSupplyLowWarning();
-}
-
-void EnterSetupPage()
-{
-  CurrentPage = SETUPPAGE;
-  NxGotoPage(PAGE_SETUP);
-  // Values refreshed by 4005 Post-init after page loads
 }
 
 void EnterStationPage()
@@ -1370,7 +1424,7 @@ void BeginAutoSequenceDrain()
   NxGotoPage(PAGE_DRAIN);
 
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-  NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+  NxSetModelImage(models[activeModelIndex].name);
   NxSetText(NX_STOP_REASON_OBJ, "Auto sequence: Draining...");
   stopReasonFlashActive = true;
 
@@ -1823,7 +1877,7 @@ void UpdateFlowDisplaysAutoStopAndProgress()
       NxGotoPage(PAGE_FILL);
 
       NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-      NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+      NxSetModelImage(models[activeModelIndex].name);
       NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
       NxSetVal(NX_FLOW_RATE_FILL_OBJ, 0);
       NxSetVal(NX_VOLUME_FILL_OBJ,    0);
@@ -1976,6 +2030,21 @@ void ProcessNextion()
   static bool waitingForFlowDrop     = false;
   static bool waitingForEmptyDelay   = false;
   static bool waitingForVolume       = false;
+
+  // SD sync state
+  static bool    waitingForIndexSize   = false;
+  static bool    waitingForModelNum    = false;
+  static bool    waitingForModelVol    = false;
+  static bool    waitingForModelSensor = false;
+  static bool    waitingForModelFill   = false;
+  static bool    waitingForModelDrain  = false;
+  static bool    waitingForModelPurge  = false;
+  static bool    waitingForModelName   = false;
+  static int     syncModelIndex        = 0;
+  static int     nameByteCount         = 0;
+  static bool    sdSyncDirty           = false;
+  static char    nameBuffer[24];
+  static bool    waitingForModelSelect = false;
   static bool waitingForFillCalVol   = false;
   static bool waitingForDrainCalVol  = false;
 
@@ -1990,18 +2059,19 @@ void ProcessNextion()
     {
       waitingForTankVol = false;
       models[previewModelIndex].tankVolumeMl = (int)constrain((int32_t)v, 0, 99999);
-      SaveModelsToSD();
-      ShowModelOnSetupPanel(previewModelIndex);
+      SaveOneModelToSD(previewModelIndex);
+      if (CurrentPage == SETUPPAGE) SendModelToSetupPage(previewModelIndex);
+      else SendModelToSetupPage(previewModelIndex);
       continue;
     }
 
     if (waitingForPumpSpd)
     {
       waitingForPumpSpd = false;
-      // Store ml/min directly
       models[previewModelIndex].pumpSpeed = (int)constrain((int32_t)v, 0, 1000);
-      SaveModelsToSD();
-      ShowModelOnSetupPanel(previewModelIndex);
+      SaveOneModelToSD(previewModelIndex);
+      if (CurrentPage == SETUPPAGE) SendModelToSetupPage(previewModelIndex);
+      else SendModelToSetupPage(previewModelIndex);
       continue;
     }
 
@@ -2009,8 +2079,9 @@ void ProcessNextion()
     {
       waitingForSensor = false;
       models[previewModelIndex].hasTankSensor = (v == 1);
-      SaveModelsToSD();
-      ShowModelOnSetupPanel(previewModelIndex);
+      SaveOneModelToSD(previewModelIndex);
+      if (CurrentPage == SETUPPAGE) SendModelToSetupPage(previewModelIndex);
+      else SendModelToSetupPage(previewModelIndex);
       continue;
     }
 
@@ -2018,18 +2089,19 @@ void ProcessNextion()
     {
       waitingForOverflowPurge = false;
       models[previewModelIndex].overflowPurgeSecs = (int)constrain((int32_t)v, 0, 10);
-      SaveModelsToSD();
-      ShowModelOnSetupPanel(previewModelIndex);
+      SaveOneModelToSD(previewModelIndex);
+      if (CurrentPage == SETUPPAGE) SendModelToSetupPage(previewModelIndex);
+      else SendModelToSetupPage(previewModelIndex);
       continue;
     }
 
     if (waitingForDrainSpeed)
     {
       waitingForDrainSpeed = false;
-      // Store ml/min directly
       models[previewModelIndex].drainSpeed = (int)constrain((int32_t)v, 0, 1000);
-      SaveModelsToSD();
-      ShowModelOnSetupPanel(previewModelIndex);
+      SaveOneModelToSD(previewModelIndex);
+      if (CurrentPage == SETUPPAGE) SendModelToSetupPage(previewModelIndex);
+      else SendModelToSetupPage(previewModelIndex);
       continue;
     }
 
@@ -2087,6 +2159,71 @@ void ProcessNextion()
       NxCmd(volCmd);
       SaveStationToSD();
       UpdateStationPageValues();
+      continue;
+    }
+
+    // SD sync handlers
+    if (waitingForIndexSize)
+    {
+      waitingForIndexSize = false;
+      // v = file size in bytes — Nextion will follow with rdfile data
+      // Nothing to do here, Nextion handles the rdfile
+      continue;
+    }
+
+    if (waitingForModelNum)
+    {
+      waitingForModelNum = false;
+      syncModelIndex = constrain((int)v, 0, MAX_MODELS - 1);
+      // Initialise model slot with defaults
+      models[syncModelIndex] = { "", 2000, false, 500, 0, 3, 500 };
+      memset(nameBuffer, 0, sizeof(nameBuffer));
+      nameByteCount = 0;
+      continue;
+    }
+
+    if (waitingForModelName)
+    {
+      // Receiving model name as individual bytes terminated by 0
+      if (v == 0 || nameByteCount >= 23)
+      {
+        nameBuffer[nameByteCount] = 0;
+        strncpy(models[syncModelIndex].name, nameBuffer, sizeof(models[syncModelIndex].name));
+        waitingForModelName = false;
+      }
+      else
+      {
+        nameBuffer[nameByteCount++] = (char)v;
+      }
+      continue;
+    }
+
+    if (waitingForModelVol)    { waitingForModelVol    = false; models[syncModelIndex].tankVolumeMl     = (int)v; continue; }
+    if (waitingForModelSensor) { waitingForModelSensor = false; models[syncModelIndex].hasTankSensor    = (v == 1); continue; }
+    if (waitingForModelFill)   { waitingForModelFill   = false; models[syncModelIndex].pumpSpeed        = constrain((int)v, 0, 1000); continue; }
+    if (waitingForModelDrain)  { waitingForModelDrain  = false; models[syncModelIndex].drainSpeed       = constrain((int)v, 0, 1000); continue; }
+    if (waitingForModelPurge)  { waitingForModelPurge  = false; models[syncModelIndex].overflowPurgeSecs = constrain((int)v, 0, 10); continue; }
+
+    if (waitingForModelSelect)
+    {
+      waitingForModelSelect = false;
+      int idx = constrain((int)v, 0, numModels - 1);
+      previewModelIndex = idx;
+
+      // Update image and name immediately
+      NxSetModelImage(models[idx].name);
+      NxSetText("tModelName", models[idx].name);
+
+      // Clear parameters while waiting for update
+      NxSetVal("tTankVol", 0);
+      NxSetText("tFillSpd", "...");
+      NxSetText("tDrainSpd", "...");
+      NxSetText("tSensor", "...");
+      NxSetVal("tPurge", 0);
+
+      // Schedule parameter update 500ms later
+      modelUpdatePending   = true;
+      modelUpdatePendingMs = millis();
       continue;
     }
 
@@ -2189,7 +2326,7 @@ void ProcessNextion()
         stopReasonFlashActive = false;
         NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
         NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-        NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+        NxSetModelImage(models[activeModelIndex].name);
 
         // Reset heli bar
         NxSetVal(NX_HELI_BAR_OBJ, 0);
@@ -2216,7 +2353,7 @@ void ProcessNextion()
 
         NxSetVal(NX_TARGET_DRAIN_OBJ, targetDrainMl);
         NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
-        NxSetPic("mMainPic", models[activeModelIndex].picIndex);
+        NxSetModelImage(models[activeModelIndex].name);
 
         // Reset heli bar to full for new drain segment
         NxSetVal(NX_HELI_BAR_OBJ, 100);
@@ -2285,7 +2422,15 @@ void ProcessNextion()
     }
 
     // Page report codes
-    if (v == NX_PAGE_REPORT_MAIN)   { CurrentPage = MAINPAGE;    continue; }
+    if (v == NX_PAGE_REPORT_MAIN)
+    {
+      CurrentPage = MAINPAGE;
+      UpdateMainPageModel();
+      UpdateSupplyTankUI();
+      NxSetText("tVersion", FW_VERSION);
+      NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
+      continue;
+    }
     if (v == NX_PAGE_REPORT_FILL)
     {
       CurrentPage = FILLPAGE;
@@ -2299,6 +2444,28 @@ void ProcessNextion()
       continue;
     }
     if (v == NX_PAGE_REPORT_LOWBAT) { CurrentPage = LOWBATTPAGE; continue; }
+    if (v == NX_PAGE_REPORT_KEYBD)  { previousPage = CurrentPage; CurrentPage = KEYBDPAGE; continue; }
+    if (v == NX_PAGE_REPORT_SETUP)
+    {
+      previousPage = CurrentPage;
+      CurrentPage = SETUPPAGE;
+      if (previousPage == KEYBDPAGE)
+      {
+        // Returning from keyboard — just refresh the current model display
+        SendModelToSetupPage(previewModelIndex);
+      }
+      else
+      {
+        // Fresh entry — show active model
+        previewModelIndex = activeModelIndex;
+        BuildAndSendModelList();
+        SendModelToSetupPage(previewModelIndex);
+      }
+      continue;
+    }
+
+    // Model selection from SetupPage2 ComboBox
+    if (v == NX_CMD_MODEL_SELECTED) { waitingForModelSelect = true; continue; }
 
     // Standard commands
     if (v == 1) { EnterFillPage();  continue; }
@@ -2326,38 +2493,30 @@ void ProcessNextion()
     if (v == 3000) { waitingForTargetDrain = true; continue; }
 
     // Setup page commands
-    if (v == NX_CMD_SETUP_PAGE)    { EnterSetupPage();                              continue; }
-    if (v == NX_CMD_SETUP_REFRESH) { ShowModelOnSetupPanel(previewModelIndex); continue; }
-    if (v == NX_CMD_MODEL1)     { ShowModelOnSetupPanel(0); continue; }
-    if (v == NX_CMD_MODEL2)     { ShowModelOnSetupPanel(1); continue; }
-    if (v == NX_CMD_MODEL3)     { ShowModelOnSetupPanel(2); continue; }
-    if (v == NX_CMD_MODEL4)     { ShowModelOnSetupPanel(3); continue; }
+    if (v == NX_CMD_SETUP_PAGE)
+    {
+      CurrentPage = SETUPPAGE;
+      NxGotoPage(PAGE_SETUP);
+      continue;
+    }
 
     if (v == NX_CMD_SELECT)
     {
       activeModelIndex = previewModelIndex;
       ApplyActiveModel();
-      Serial.print("Selected: ");
-      Serial.println(models[activeModelIndex].name);
       continue;
     }
-
-    if (v == NX_CMD_SAVE)  { SaveModelsToSD(); continue; }
 
     if (v == NX_CMD_BACK_SETUP)
     {
       activeModelIndex = previewModelIndex;
       ApplyActiveModel();
-      SaveModelsToSD();
-
       CurrentPage = MAINPAGE;
+      delay(50);
       NxGotoPage(PAGE_MAIN);
-      NxSetText("tVersion", FW_VERSION);
-      NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
-      UpdateMainPageModel();
-      UpdateSupplyTankUI();
       continue;
     }
+
 
     if (v == NX_CMD_STATION) { EnterStationPage(); continue; }
 
@@ -2376,7 +2535,6 @@ void ProcessNextion()
 
       CurrentPage = SETUPPAGE;
       NxGotoPage(PAGE_SETUP);
-      ShowModelOnSetupPanel(activeModelIndex);
       continue;
     }
 
@@ -2394,6 +2552,43 @@ void ProcessNextion()
     if (v == NX_CMD_SET_FLOW_DROP)   { waitingForFlowDrop   = true; continue; }
     if (v == NX_CMD_SET_EMPTY_DELAY) { waitingForEmptyDelay = true; continue; }
     if (v == NX_CMD_VOLUME) { waitingForVolume = true; continue; }
+
+    // ===============================
+    // SD SYNC PROTOCOL
+    // ===============================
+    if (v == NX_CMD_SD_INDEX_SIZE)  { waitingForIndexSize  = true; continue; }
+    if (v == NX_CMD_SD_MODEL_START) { waitingForModelNum   = true; continue; }
+    if (v == NX_CMD_SD_MODEL_VOL)   { waitingForModelVol   = true; continue; }
+    if (v == NX_CMD_SD_MODEL_SENSOR){ waitingForModelSensor= true; continue; }
+    if (v == NX_CMD_SD_MODEL_FILL)  { waitingForModelFill  = true; continue; }
+    if (v == NX_CMD_SD_MODEL_DRAIN) { waitingForModelDrain = true; continue; }
+    if (v == NX_CMD_SD_MODEL_PURGE) { waitingForModelPurge = true; continue; }
+    if (v == NX_CMD_SD_MODEL_NAME)  { waitingForModelName  = true; nameByteCount = 0; continue; }
+
+    if (v == NX_CMD_SD_MODEL_END)
+    {
+      // Model fully received — save
+      Serial.print("SD Sync: model "); Serial.print(syncModelIndex);
+      Serial.print(" = "); Serial.println(models[syncModelIndex].name);
+      if (syncModelIndex >= numModels) numModels = syncModelIndex + 1;
+      sdSyncDirty = true;
+      continue;
+    }
+
+    if (v == NX_CMD_SD_SYNC_DONE)
+    {
+      // All models received
+      activeModelIndex = constrain(activeModelIndex, 0, numModels - 1);
+      if (sdSyncDirty)
+      {
+        SaveModelsToSD();
+        sdSyncDirty = false;
+        Serial.print("SD Sync complete: "); Serial.print(numModels); Serial.println(" models");
+      }
+      // Tell Nextion to build ComboBox path
+      BuildAndSendModelList();
+      continue;
+    }
 
     if (v == NX_CMD_FILL_CAL_START)
     {
@@ -2595,6 +2790,56 @@ static void UpdateScreenTimeout()
 }
 
 // ===============================
+// SD SYNC HELPER FUNCTIONS
+// ===============================
+static void SendModelToSetupPage(int idx)
+{
+  if (idx < 0 || idx >= numModels) return;
+  ModelConfig &m = models[idx];
+
+  // Send text fields
+  NxSetText("tModelName", m.name);
+
+  NxSetVal("tTankVol", m.tankVolumeMl);        // Number component
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%d ml/m", m.pumpSpeed);
+  NxSetText("tFillSpd", buf);                  // Text component
+
+  snprintf(buf, sizeof(buf), "%d ml/m", m.drainSpeed);
+  NxSetText("tDrainSpd", buf);                 // Text component
+
+  NxSetText("tSensor", m.hasTankSensor ? "YES" : "NO");  // Text component
+
+  NxSetVal("tPurge", m.overflowPurgeSecs);     // Number component
+
+  // Load model image from Nextion SD
+  NxSetModelImage(m.name);
+
+}
+
+static void BuildAndSendModelList()
+{
+  // Build newline-separated model name string for Nextion ComboBox .path
+  char path[MAX_MODELS * 25];
+  path[0] = 0;
+  for (int i = 0; i < numModels; i++)
+  {
+    if (i > 0) strncat(path, "\r\n", sizeof(path) - strlen(path) - 1);
+    strncat(path, models[i].name, sizeof(path) - strlen(path) - 1);
+  }
+  // Add blank entries at end to reduce cyclic confusion
+  strncat(path, "\r\n\r\n\r\n\r\n\r\n", sizeof(path) - strlen(path) - 1);
+
+  // Send to Nextion TextSelect
+  char cmd[MAX_MODELS * 25 + 20];
+  snprintf(cmd, sizeof(cmd), "tsModel.path=\"%s\"", path);
+  NxCmd(cmd);
+  NxCmd("ref tsModel");
+  Serial.print("ComboBox path sent: "); Serial.println(path);
+}
+
+// ===============================
 // SETUP / LOOP
 // ===============================
 void setup()
@@ -2677,7 +2922,7 @@ void setup()
     {
       if (millis() - bootHoldStart >= BTN_BOOT_SETUP_MS)
       {
-        EnterSetupPage();
+        NxGotoPage(PAGE_SETUP);
         break;
       }
       delay(10);
@@ -2698,4 +2943,11 @@ void loop()
   UpdatePowerUIAndSafety();
   UpdatePowerButton();
   UpdateScreenTimeout();
+
+  // Delayed parameter update after model image shown
+  if (modelUpdatePending && (millis() - modelUpdatePendingMs >= 500))
+  {
+    modelUpdatePending = false;
+    if (CurrentPage == SETUPPAGE) SendModelToSetupPage(previewModelIndex);
+  }
 }
