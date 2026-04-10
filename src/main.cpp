@@ -128,6 +128,7 @@ uint8_t CurrentPage = MAINPAGE;
 uint8_t previousPage = MAINPAGE;
 bool    modelUpdatePending = false;
 uint32_t modelUpdatePendingMs = 0;
+bool    booted = false;  // set true after first MainPage load
 bool PumpEnabled = false;
 
 #define NX_PAGE_REPORT_SPLASH  5000  // SplashPage loaded
@@ -773,7 +774,7 @@ static void UpdateStationPageValues()
   snprintf(buf, sizeof(buf), "%ds", (int)(tankEmptyMinRunMs / 1000));
   NxSetText(NX_ST_EMPTY_DELAY_VAL, buf);
 
-  snprintf(buf, sizeof(buf), "%d%%", nexionVolume);
+  snprintf(buf, sizeof(buf), "Volume %d%%", nexionVolume);
   NxSetText("tVolume", buf);
 
   snprintf(buf, sizeof(buf), "%.1f", (double)fillPulsesPerLiter);
@@ -2428,18 +2429,14 @@ void ProcessNextion()
     {
       previousPage = CurrentPage;
       CurrentPage = SPLASHPAGE;
-      // Play startup sound on standby wake
-      char volCmd[20];
-      snprintf(volCmd, sizeof(volCmd), "volume=%d", nexionVolume);
-      NxCmd(volCmd);
-      delay(50);
-      NxCmd("play 0,0,0");  // startup sound
+      NxSetText("tVersion", FW_VERSION);
       continue;
     }
     if (v == NX_PAGE_REPORT_MAIN)
     {
       previousPage = CurrentPage;
       CurrentPage = MAINPAGE;
+      booted = true;  // mark as fully booted after first MainPage load
       delay(300);
       UpdateMainPageModel();
       UpdateSupplyTankUI();
@@ -2709,7 +2706,9 @@ static void ExitScreenStandby()
 {
   screenStandby = false;
   NxCmd("dim=100");
-  
+  char volCmd[20];
+  snprintf(volCmd, sizeof(volCmd), "volume=%d", nexionVolume);
+  NxCmd(volCmd);
   NxCmd("play 0,0,0");  // startup sound
   lastActivityMs = millis();
 }
@@ -2908,17 +2907,18 @@ void setup()
   NxGotoPage(PAGE_SPLASH);
   CurrentPage = SPLASHPAGE;
   lastActivityMs = millis();
+  NxSetText("tVersion", FW_VERSION);
 
   // Set volume and play startup sound while splash is showing
-  delay(500);  // let splash render
+  delay(100);
   char volCmd[20];
   snprintf(volCmd, sizeof(volCmd), "volume=%d", nexionVolume);
   NxCmd(volCmd);
-  delay(100);
   NxCmd("play 0,0,0");  // startup sound
 
   // Wait for sound to finish then navigate to MainPage
   delay(2500);
+  NxGotoPage(PAGE_MAIN);
 
   PumpEnabled        = false;
   currentSpeedSigned = 0;
@@ -2926,12 +2926,7 @@ void setup()
   SetPumpOutput(0);
 
   lowBatteryLatched = false;
-  CurrentPage = SPLASHPAGE;
-  lastActivityMs = millis();  // reset activity timer at boot
-  // SplashPage shown on boot — Nextion timer will navigate to MainPage
-  // Teensy initialises audio volume here while splash shows
-  delay(200);
-  NxSetVal(NX_VOLUME_MAIN_OBJ, 0);
+  lastActivityMs = millis();
 
   ResetFlowUi(gFillUi);
   ResetFlowUi(gDrainUi);
