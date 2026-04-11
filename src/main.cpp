@@ -61,15 +61,12 @@
 
 // Fill page objects
 #define NX_FLOW_RATE_FILL_OBJ "FlowFill"
-#define NX_VOLUME_FILL_OBJ    "VolFill"
-#define NX_TARGET_FILL_OBJ    "TgtFill"
 #define NX_PROGRESS_FILL_OBJ  "ProgFill"
 #define NX_PERCENT_FILL_OBJ   "PctFill"
-#define NX_STOP_REASON_OBJ    "StopReason"
+#define NX_STOP_REASON_OBJ    "Message"
 
 // Drain page objects
 #define NX_FLOW_RATE_DRAIN_OBJ "FlowDrain"
-#define NX_VOLUME_DRAIN_OBJ    "VolDrain"
 #define NX_TARGET_DRAIN_OBJ    "TgtDrain"
 
 // Main page objects
@@ -234,7 +231,7 @@ int supplyLowThresholdMl   = SUPPLY_LOW_DEFAULT_ML;
 // Flash state for low supply warning
 static bool     supplyLowFlash    = false;
 
-// Flash state for StopReason message (auto sequence status)
+// Flash state for Message component (auto sequence status)
 static bool stopReasonFlash       = false;
 static bool stopReasonFlashActive = false;
 
@@ -671,9 +668,10 @@ static void DetectCellCount(float packV)
 
 // Nextion colour constants
 #define NX_COLOR_WHITE       65535
-#define NX_COLOR_TXT_NORMAL  1055   // tSupVol normal pco
+#define NX_COLOR_TXT_NORMAL  0      // tSupVol normal pco (black)
 #define NX_COLOR_RED         63488
 #define NX_COLOR_BLACK       0
+#define NX_COLOR_BLUE        1055
 #define NX_COLOR_GREEN_BAR   1024   // ProgSup pco (bar fill colour)
 
 // ===============================
@@ -710,13 +708,19 @@ static void UpdateSupplyLowWarning()
 // STOP REASON FLASH
 // Called from UpdatePowerUIAndSafety every 500ms
 // ===============================
-static void UpdateStopReasonFlash()
+static void SetMessage(const char* msg, int colour)
+{
+  NxSetText(NX_STOP_REASON_OBJ, msg);
+  NxSetAttr("Message.pco", colour);
+}
+
+static void UpdateMessageFlash()
 {
   if (!stopReasonFlashActive) return;
   if (CurrentPage != FILLPAGE && CurrentPage != DRAINPAGE) return;
 
   stopReasonFlash = !stopReasonFlash;
-  NxSetAttr("StopReason.pco", stopReasonFlash ? NX_COLOR_RED : NX_COLOR_BLACK);
+  NxSetAttr("Message.pco", stopReasonFlash ? NX_COLOR_RED : NX_COLOR_BLACK);
 }
 
 // ===============================
@@ -1060,6 +1064,20 @@ static void NxSetModelImage(const char* modelName)
   NxCmd(imgCmd);
 }
 
+static void UpdateStopReturnButtons(bool pumpRunning)
+{
+  if (CurrentPage == FILLPAGE)
+  {
+    NxCmd(pumpRunning ? "vis Stop,1"    : "vis Stop,0");
+    NxCmd(pumpRunning ? "vis bReturn,0" : "vis bReturn,1");
+  }
+  else if (CurrentPage == DRAINPAGE)
+  {
+    NxCmd(pumpRunning ? "vis Stop,1"    : "vis Stop,0");
+    NxCmd(pumpRunning ? "vis bReturn,0" : "vis bReturn,1");
+  }
+}
+
 void UpdateMainPageModel()
 {
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
@@ -1090,6 +1108,7 @@ static void StopPumpInPlace()
   PumpDriverDisable();
   digitalWrite(FILL_RELAY, LOW);
   digitalWrite(DRAIN_RELAY, LOW);
+  UpdateStopReturnButtons(false);
 }
 
 // ===============================
@@ -1165,14 +1184,6 @@ void StopPump()
 
 void EnterFillPage()
 {
-  // Models without tank sensor use auto drain-then-fill sequence
-  if (!models[activeModelIndex].hasTankSensor)
-  {
-    ApplyActiveModel();
-    BeginAutoSequenceDrain();
-    return;
-  }
-
   noInterrupts(); fillPulses = 0; interrupts();
   lastFillVolumeMl       = 0;
   supplyAtSessionStartMl = supplyTankRemainingMl;
@@ -1193,9 +1204,7 @@ void EnterFillPage()
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
   NxSetModelImage(models[activeModelIndex].name);
 
-  NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
   NxSetVal(NX_FLOW_RATE_FILL_OBJ, 0);
-  NxSetVal(NX_VOLUME_FILL_OBJ,    0);
   NxSetVal(NX_PROGRESS_FILL_OBJ,  0);
   NxSetText(NX_PERCENT_FILL_OBJ,  "0%");
   { int sliderMlMin = models[activeModelIndex].pumpSpeed;
@@ -1203,7 +1212,7 @@ void EnterFillPage()
     char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", sliderMlMin); NxSetText(NX_FILL_SPD_LABEL, mlBuf); }
   NxSetText(NX_STOP_REASON_OBJ,   "");
   stopReasonFlashActive = false;
-  NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
+  NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
 
   NxSetVal(NX_HELI_BAR_OBJ, 0);
   NxSetText(NX_HELI_PCT_OBJ, "0%");
@@ -1225,9 +1234,8 @@ void RefreshFillPage()
     NxSetVal(SLIDER_FILL, sliderMlMin);
     char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", sliderMlMin); NxSetText(NX_FILL_SPD_LABEL, mlBuf); }
 
-  NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
   NxSetVal(NX_FLOW_RATE_FILL_OBJ, gFillUi.lastSentFlow > 0 ? gFillUi.lastSentFlow : 0);
-  NxSetVal(NX_VOLUME_FILL_OBJ,    lastFillVolumeMl);
+  NxSetVal("jFlowRate", constrain((gFillUi.lastSentFlow > 0 ? gFillUi.lastSentFlow : 0) / 10, 0, 100));
 
   int pct = 0;
   if (targetFillMl > 0)
@@ -1248,6 +1256,7 @@ void RefreshFillPage()
 
   UpdateSupplyTankUI();
   UpdateSupplyLowWarning();
+  UpdateStopReturnButtons(PumpEnabled);
 }
 
 void EnterDrainPage()
@@ -1273,7 +1282,6 @@ void EnterDrainPage()
 
   NxSetVal(NX_TARGET_DRAIN_OBJ,    targetDrainMl);
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
-  NxSetVal(NX_VOLUME_DRAIN_OBJ,    0);
   { int sliderMlMin = models[activeModelIndex].drainSpeed;
     NxSetVal(SLIDER_DRAIN, sliderMlMin);
     char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", sliderMlMin); NxSetText(NX_DRAIN_SPD_LABEL, mlBuf); }
@@ -1297,7 +1305,7 @@ void RefreshDrainPage()
   int drainRef = (targetDrainMl > 0) ? targetDrainMl : models[activeModelIndex].tankVolumeMl;
   NxSetVal(NX_TARGET_DRAIN_OBJ,    drainRef);
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, gDrainUi.lastSentFlow > 0 ? gDrainUi.lastSentFlow : 0);
-  NxSetVal(NX_VOLUME_DRAIN_OBJ,    lastDrainVolumeMl);
+  NxSetVal("jDFlowRate", constrain((gDrainUi.lastSentFlow > 0 ? gDrainUi.lastSentFlow : 0) / 10, 0, 100));
 
   int heliPct = 100;
   if (drainRef > 0)
@@ -1315,6 +1323,7 @@ void RefreshDrainPage()
 
   UpdateSupplyTankUI();
   UpdateSupplyLowWarning();
+  UpdateStopReturnButtons(PumpEnabled);
 }
 
 void EnterStationPage()
@@ -1356,6 +1365,8 @@ void BeginFill(int pwm)
 
   PumpDriverEnable();
   PumpEnabled = true;
+  SetMessage("Filling", NX_COLOR_BLUE);
+  UpdateStopReturnButtons(true);
 
   NEXTION.flush();  // drain serial buffer before pump starts
 
@@ -1386,6 +1397,7 @@ void BeginDrain(int pwm)
 
   PumpDriverEnable();
   PumpEnabled = true;
+  UpdateStopReturnButtons(true);
 
   NEXTION.flush();  // drain serial buffer before pump starts
 
@@ -1429,14 +1441,18 @@ void BeginAutoSequenceDrain()
 
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
   NxSetModelImage(models[activeModelIndex].name);
-  NxSetText(NX_STOP_REASON_OBJ, "Auto sequence: Draining...");
+  SetMessage("Emptying Tank before refilling", NX_COLOR_RED);
   stopReasonFlashActive = true;
 
   int drainRef = models[activeModelIndex].tankVolumeMl;
   NxSetVal(NX_TARGET_DRAIN_OBJ,    0);
   NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, 0);
-  NxSetVal(NX_VOLUME_DRAIN_OBJ,    0);
-  // Do NOT set slider here — avoids any possible feedback loop
+  NxSetVal("jDFlowRate", 0);
+  // Set drain speed slider and label
+  { int sliderMlMin = models[activeModelIndex].drainSpeed;
+    NxSetVal(SLIDER_DRAIN, sliderMlMin);
+    char mlBuf[16]; snprintf(mlBuf, sizeof(mlBuf), "%d ml/m", sliderMlMin);
+    NxSetText(NX_DRAIN_SPD_LABEL, mlBuf); }
   NxSetVal(NX_HELI_BAR_OBJ, 100);
   NxSetText(NX_HELI_PCT_OBJ, "100%");
   char buf[32];
@@ -1455,7 +1471,7 @@ void BeginOverflowPurge()
     autoFillSequence = AF_NONE;
     NxSetText(NX_STOP_REASON_OBJ, "Complete");
     stopReasonFlashActive = false;
-    NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
+    NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
     return;
   }
 
@@ -1652,13 +1668,14 @@ static void UpdateFillUiAndStops(uint32_t now)
   {
     gFillUi.lastSentFlow = flow_ml_min;
     NxSetVal(NX_FLOW_RATE_FILL_OBJ, flow_ml_min);
+    // Update flow rate bar (0-1000 ml/min scaled to 0-100)
+    NxSetVal("jFlowRate", constrain(flow_ml_min / 10, 0, 100));
   }
 
   if (volume_ml != gFillUi.lastSentVol)
   {
     gFillUi.lastSentVol = volume_ml;
-    NxSetVal(NX_VOLUME_FILL_OBJ, volume_ml);
-  }
+    }
 
   if (pct != gFillUi.lastSentPct)
   {
@@ -1741,13 +1758,14 @@ static void UpdateDrainUiAndStops(uint32_t now)
   {
     gDrainUi.lastSentFlow = flow_ml_min;
     NxSetVal(NX_FLOW_RATE_DRAIN_OBJ, flow_ml_min);
+    // Update drain flow rate bar (0-1000 ml/min scaled to 0-100)
+    NxSetVal("jDFlowRate", constrain(flow_ml_min / 10, 0, 100));
   }
 
   if (volume_ml != gDrainUi.lastSentVol)
   {
     gDrainUi.lastSentVol = volume_ml;
-    NxSetVal(NX_VOLUME_DRAIN_OBJ, volume_ml);
-
+  
     int drainRef = (targetDrainMl > 0) ? targetDrainMl : models[activeModelIndex].tankVolumeMl;
     int heliPct = 100;
     if (drainRef > 0)
@@ -1808,7 +1826,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
       {
         NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank already empty");
       stopReasonFlashActive = false;
-      NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
+      NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
         StopPumpInPlace();
       }
       return;
@@ -1833,7 +1851,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
         {
           NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank empty detected");
       stopReasonFlashActive = false;
-      NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
+      NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
           StopPumpInPlace();
         }
         return;
@@ -1882,10 +1900,8 @@ void UpdateFlowDisplaysAutoStopAndProgress()
 
       NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
       NxSetModelImage(models[activeModelIndex].name);
-      NxSetVal(NX_TARGET_FILL_OBJ,    targetFillMl);
-      NxSetVal(NX_FLOW_RATE_FILL_OBJ, 0);
-      NxSetVal(NX_VOLUME_FILL_OBJ,    0);
-      NxSetVal(NX_PROGRESS_FILL_OBJ,  0);
+          NxSetVal(NX_FLOW_RATE_FILL_OBJ, 0);
+          NxSetVal(NX_PROGRESS_FILL_OBJ,  0);
       NxSetText(NX_PERCENT_FILL_OBJ,  "0%");
       // Do NOT set slider here — avoids any possible echo from Nextion
       NxSetText(NX_STOP_REASON_OBJ,   "Auto sequence: Filling...");
@@ -1917,7 +1933,7 @@ void UpdateFlowDisplaysAutoStopAndProgress()
       autoFillSequence = AF_NONE;
       NxSetText(NX_STOP_REASON_OBJ, "Complete");
       stopReasonFlashActive = false;
-      NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
+      NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
     }
   }
 }
@@ -1995,7 +2011,7 @@ static void UpdatePowerUIAndSafety()
   UpdateSupplyLowWarning();
 
   // Flash stop reason message if active
-  UpdateStopReasonFlash();
+  UpdateMessageFlash();
 }
 
 // ===============================
@@ -2322,12 +2338,11 @@ void ProcessNextion()
         supplyAtSessionStartMl = supplyTankRemainingMl;
         ResetFlowUi(gFillUi);
 
-        NxSetVal(NX_TARGET_FILL_OBJ,   targetFillMl);
-        NxSetVal(NX_PROGRESS_FILL_OBJ, 0);
+              NxSetVal(NX_PROGRESS_FILL_OBJ, 0);
         NxSetText(NX_PERCENT_FILL_OBJ, "0%");
         NxSetText(NX_STOP_REASON_OBJ,  "");
         stopReasonFlashActive = false;
-        NxSetAttr("StopReason.pco", NX_COLOR_TXT_NORMAL);
+        NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
         NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
         NxSetModelImage(models[activeModelIndex].name);
 
@@ -2372,12 +2387,6 @@ void ProcessNextion()
     if (waitingForSpeed)
     {
       waitingForSpeed = false;
-
-      // Block speed commands during drain and pending phases
-      if (autoFillSequence == AF_DRAIN_PENDING || autoFillSequence == AF_DRAINING)
-      {
-        continue;
-      }
 
       if (CurrentPage == FILLPAGE)
       {
@@ -2436,24 +2445,31 @@ void ProcessNextion()
     {
       previousPage = CurrentPage;
       CurrentPage = MAINPAGE;
-      booted = true;  // mark as fully booted after first MainPage load
+      booted = true;
       delay(300);
       UpdateMainPageModel();
       UpdateSupplyTankUI();
       NxSetText("tVersion", FW_VERSION);
       NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
+      SetMessage("MCP Fill Station", NX_COLOR_BLUE);
       continue;
     }
     if (v == NX_PAGE_REPORT_FILL)
     {
       CurrentPage = FILLPAGE;
       RefreshFillPage();
+      // Only set default message if not already filling
+      if (!PumpEnabled)
+        SetMessage("Fill Mode", NX_COLOR_BLUE);
       continue;
     }
     if (v == NX_PAGE_REPORT_DRAIN)
     {
       CurrentPage = DRAINPAGE;
       RefreshDrainPage();
+      // Only set default message if not in auto sequence
+      if (autoFillSequence == AF_NONE)
+        SetMessage("Drain Mode", NX_COLOR_BLUE);
       continue;
     }
     if (v == NX_PAGE_REPORT_LOWBAT) { CurrentPage = LOWBATTPAGE; continue; }
@@ -2498,7 +2514,17 @@ void ProcessNextion()
       continue;
     }
 
-    if (v == 11) { if (CurrentPage == FILLPAGE)  BeginFill(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].pumpSpeed) : MIN_PWM);  continue; }
+    if (v == 11)
+    {
+      if (CurrentPage == FILLPAGE)
+      {
+        if (!models[activeModelIndex].hasTankSensor)
+          BeginAutoSequenceDrain();  // no sensor — drain first then fill
+        else
+          BeginFill(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].pumpSpeed) : MIN_PWM);
+      }
+      continue;
+    }
     if (v == 12) { if (CurrentPage == DRAINPAGE) BeginDrain(drainMlPerMinPerPwm > 0.0f ? DrainMlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM); continue; }
 
     if (v == 1000) { waitingForSpeed      = true; continue; }
