@@ -142,6 +142,7 @@ bool PumpEnabled = false;
 #define NX_CMD_STATION     4030
 #define NX_CMD_SELECT      4010  // Make previewed model active
 #define NX_CMD_BACK_SETUP  4020  // Back from SetupPage to MainPage
+#define NX_CMD_RESET_STATS 4025  // Reset usage stats for previewed model
 
 // Station page command codes
 #define NX_CMD_BACK_STATION    7000
@@ -195,6 +196,11 @@ struct ModelConfig
   uint8_t picIndex;          // legacy - kept for compatibility
   int     overflowPurgeSecs; // 0 = skip purge, 1-10 seconds
   int     drainSpeed;        // drain speed (ml/min)
+  // Usage statistics
+  uint32_t totalFills;       // number of fill sessions
+  uint32_t totalDrains;      // number of drain sessions
+  uint32_t totalFillMl;      // total volume filled (ml)
+  uint32_t totalDrainMl;     // total volume drained (ml)
 };
 
 ModelConfig models[MAX_MODELS];
@@ -705,6 +711,29 @@ static void UpdateSupplyLowWarning()
 }
 
 // ===============================
+// ===============================
+// STATS HELPERS
+// ===============================
+static void SendStatsToSetupPage(int idx)
+{
+  if (idx < 0 || idx >= numModels) return;
+  ModelConfig &m = models[idx];
+  char buf[16];
+
+  snprintf(buf, sizeof(buf), "%lu", (unsigned long)m.totalFills);
+  NxSetText("tFillCount", buf);
+
+  snprintf(buf, sizeof(buf), "%lu", (unsigned long)m.totalDrains);
+  NxSetText("tDrainCount", buf);
+
+  snprintf(buf, sizeof(buf), "%.2f", m.totalFillMl / 1000.0f);
+  NxSetText("tFillVol", buf);
+
+  snprintf(buf, sizeof(buf), "%.2f", m.totalDrainMl / 1000.0f);
+  NxSetText("tDrainVol", buf);
+}
+
+// ===============================
 // STOP REASON FLASH
 // Called from UpdatePowerUIAndSafety every 500ms
 // ===============================
@@ -811,6 +840,10 @@ void SaveModelsToSD()
     f.print("fillSpeed=");     f.println(models[i].pumpSpeed);
     f.print("drainSpeed=");    f.println(models[i].drainSpeed);
     f.print("overflowPurge="); f.println(models[i].overflowPurgeSecs);
+    f.print("totalFills=");    f.println(models[i].totalFills);
+    f.print("totalDrains=");   f.println(models[i].totalDrains);
+    f.print("totalFillMl=");   f.println(models[i].totalFillMl);
+    f.print("totalDrainMl=");  f.println(models[i].totalDrainMl);
     f.close();
   }
   Serial.println("SD: models saved");
@@ -829,6 +862,10 @@ static void SaveOneModelToSD(int idx)
   f.print("fillSpeed=");     f.println(models[idx].pumpSpeed);
   f.print("drainSpeed=");    f.println(models[idx].drainSpeed);
   f.print("overflowPurge="); f.println(models[idx].overflowPurgeSecs);
+  f.print("totalFills=");    f.println(models[idx].totalFills);
+  f.print("totalDrains=");   f.println(models[idx].totalDrains);
+  f.print("totalFillMl=");   f.println(models[idx].totalFillMl);
+  f.print("totalDrainMl=");  f.println(models[idx].totalDrainMl);
   f.close();
 }
 
@@ -878,6 +915,10 @@ void LoadModelsFromSD()
     models[numModels].drainSpeed        = 500;
     models[numModels].overflowPurgeSecs = 3;
     models[numModels].picIndex          = 0;
+    models[numModels].totalFills        = 0;
+    models[numModels].totalDrains       = 0;
+    models[numModels].totalFillMl       = 0;
+    models[numModels].totalDrainMl      = 0;
 
     // Load config.txt for this model
     char path[48];
@@ -901,6 +942,14 @@ void LoadModelsFromSD()
             models[numModels].drainSpeed = constrain(ParseConfigValue(line), 0, 1000);
           else if (line.startsWith("overflowPurge="))
             models[numModels].overflowPurgeSecs = constrain(ParseConfigValue(line), 0, 10);
+          else if (line.startsWith("totalFills="))
+            models[numModels].totalFills = (uint32_t)ParseConfigValue(line);
+          else if (line.startsWith("totalDrains="))
+            models[numModels].totalDrains = (uint32_t)ParseConfigValue(line);
+          else if (line.startsWith("totalFillMl="))
+            models[numModels].totalFillMl = (uint32_t)ParseConfigValue(line);
+          else if (line.startsWith("totalDrainMl="))
+            models[numModels].totalDrainMl = (uint32_t)ParseConfigValue(line);
         }
         cfg.close();
       }
@@ -1469,6 +1518,9 @@ void BeginOverflowPurge()
   {
     // No purge configured — show complete and stay on fill page
     autoFillSequence = AF_NONE;
+    models[activeModelIndex].totalFills++;
+    models[activeModelIndex].totalFillMl += (uint32_t)lastFillVolumeMl;
+    SaveOneModelToSD(activeModelIndex);
     NxSetText(NX_STOP_REASON_OBJ, "Complete");
     stopReasonFlashActive = false;
     NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
@@ -1792,8 +1844,11 @@ static void UpdateDrainUiAndStops(uint32_t now)
 
   if (PumpEnabled && targetDrainMl > 0 && lastDrainVolumeMl >= targetDrainMl)
   {
-    NxSetText(NX_STOP_REASON_OBJ, "Stopped: Target volume reached");
     StopPumpInPlace();
+    models[activeModelIndex].totalDrains++;
+    models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
+    SaveOneModelToSD(activeModelIndex);
+    NxSetText(NX_STOP_REASON_OBJ, "Stopped: Target volume reached");
     return;
   }
 
@@ -1818,12 +1873,18 @@ static void UpdateDrainUiAndStops(uint32_t now)
       if (autoFillSequence == AF_DRAINING)
       {
         StopPumpInPlace();
+        models[activeModelIndex].totalDrains++;
+        models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
+        SaveOneModelToSD(activeModelIndex);
         autoFillTransitionMs = millis();
         NxSetText(NX_STOP_REASON_OBJ, "Auto sequence: Tank empty - starting fill...");
       stopReasonFlashActive = true;
       }
       else
       {
+        models[activeModelIndex].totalDrains++;
+        models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
+        SaveOneModelToSD(activeModelIndex);
         NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank already empty");
       stopReasonFlashActive = false;
       NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
@@ -1843,12 +1904,18 @@ static void UpdateDrainUiAndStops(uint32_t now)
         {
           // Auto sequence — transition to fill after pause
           StopPumpInPlace();
+          models[activeModelIndex].totalDrains++;
+          models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
+          SaveOneModelToSD(activeModelIndex);
           autoFillTransitionMs = millis();
           NxSetText(NX_STOP_REASON_OBJ, "Auto sequence: Tank empty - starting fill...");
       stopReasonFlashActive = true;
         }
         else
         {
+          models[activeModelIndex].totalDrains++;
+          models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
+          SaveOneModelToSD(activeModelIndex);
           NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank empty detected");
       stopReasonFlashActive = false;
       NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
@@ -1931,6 +1998,9 @@ void UpdateFlowDisplaysAutoStopAndProgress()
     {
       StopPumpInPlace();
       autoFillSequence = AF_NONE;
+      models[activeModelIndex].totalFills++;
+      models[activeModelIndex].totalFillMl += (uint32_t)lastFillVolumeMl;
+      SaveOneModelToSD(activeModelIndex);
       NxSetText(NX_STOP_REASON_OBJ, "Complete");
       stopReasonFlashActive = false;
       NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
@@ -2451,7 +2521,7 @@ void ProcessNextion()
       UpdateSupplyTankUI();
       NxSetText("tVersion", FW_VERSION);
       NxSetText("tBattType", cellCount == 3 ? "3S Battery" : "2S Battery");
-      SetMessage("MCP Fill Station", NX_COLOR_BLUE);
+      SetMessage("MCP Auto Fill Station", NX_COLOR_BLUE);
       continue;
     }
     if (v == NX_PAGE_REPORT_FILL)
@@ -2553,6 +2623,17 @@ void ProcessNextion()
       CurrentPage = MAINPAGE;
       delay(50);
       NxGotoPage(PAGE_MAIN);
+      continue;
+    }
+
+    if (v == NX_CMD_RESET_STATS)
+    {
+      models[previewModelIndex].totalFills   = 0;
+      models[previewModelIndex].totalDrains  = 0;
+      models[previewModelIndex].totalFillMl  = 0;
+      models[previewModelIndex].totalDrainMl = 0;
+      SaveOneModelToSD(previewModelIndex);
+      SendStatsToSetupPage(previewModelIndex);
       continue;
     }
 
@@ -2857,6 +2938,8 @@ static void SendModelToSetupPage(int idx)
   // Load model image from Nextion SD
   NxSetModelImage(m.name);
 
+  // Send usage stats
+  SendStatsToSetupPage(idx);
 }
 
 static void BuildAndSendModelList()
