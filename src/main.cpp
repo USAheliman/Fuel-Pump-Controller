@@ -108,6 +108,7 @@
 #define NX_ST_FILL_STATUS     "tFillCalStatus"
 #define NX_ST_DRAIN_PULSE_VAL "tDrainPulseVal"
 #define NX_ST_DRAIN_STATUS    "tDrainCalStat"
+#define NX_ST_BATT_LOW_VAL    "tBattLowVal"
 
 // ===============================
 // PAGE STATE
@@ -156,6 +157,7 @@ bool PumpEnabled = false;
 #define NX_CMD_SET_FLOW_DROP   7013
 #define NX_CMD_SET_EMPTY_DELAY 7014
 #define NX_CMD_VOLUME          7015
+#define NX_CMD_SET_BATT_LOW    7016
 
 // ===============================
 // SD SYNC PROTOCOL (Nextion -> Teensy)
@@ -390,9 +392,10 @@ volatile uint32_t drainPulses = 0;
 // ===============================
 Adafruit_INA219 ina219;
 
-#define CUTOFF_V_PER_CELL 3.82f
+#define CUTOFF_V_PER_CELL_DEFAULT 3.82f
 #define MAX_CURRENT_A     5.0f
 
+float cutoffVPerCell   = CUTOFF_V_PER_CELL_DEFAULT;
 int  cellCount         = 0;
 bool lowBatteryLatched = false;
 
@@ -486,6 +489,7 @@ void SaveStationToSD();
 void LoadStationFromSD();
 void ApplyActiveModel();
 void UpdateMainPageModel();
+static void SendModelInfoToPage();
 static void UpdateSupplyTankUI();
 static void UpdateSupplyLowWarning();
 static void UpdateStationPageValues();
@@ -733,6 +737,40 @@ static void SendStatsToSetupPage(int idx)
   NxSetText("tDrainVol", buf);
 }
 
+static void SendStatsToStationPage()
+{
+  uint32_t totalFills   = 0;
+  uint32_t totalDrains  = 0;
+  uint32_t totalFillMl  = 0;
+  uint32_t totalDrainMl = 0;
+
+  for (int i = 0; i < numModels; i++)
+  {
+    totalFills   += models[i].totalFills;
+    totalDrains  += models[i].totalDrains;
+    totalFillMl  += models[i].totalFillMl;
+    totalDrainMl += models[i].totalDrainMl;
+  }
+
+  char buf[40];
+
+  snprintf(buf, sizeof(buf), "Total Fills : %lu", (unsigned long)totalFills);
+  NxSetText("tStTotalFills", buf);
+
+  snprintf(buf, sizeof(buf), "Total Drains : %lu", (unsigned long)totalDrains);
+  NxSetText("tStTotalDrains", buf);
+
+  snprintf(buf, sizeof(buf), "Fill Volume (L) : %.2f", totalFillMl / 1000.0f);
+  NxSetText("tStFillVol", buf);
+
+  snprintf(buf, sizeof(buf), "Drain Volume (L) : %.2f", totalDrainMl / 1000.0f);
+  NxSetText("tStDrainVol", buf);
+
+  int32_t netMl = (int32_t)totalFillMl - (int32_t)totalDrainMl;
+  snprintf(buf, sizeof(buf), "Fuel used (L) : %.2f", netMl / 1000.0f);
+  NxSetText("tStNetVol", buf);
+}
+
 // ===============================
 // STOP REASON FLASH
 // Called from UpdatePowerUIAndSafety every 500ms
@@ -810,11 +848,16 @@ static void UpdateStationPageValues()
   snprintf(buf, sizeof(buf), "Volume %d%%", nexionVolume);
   NxSetText("tVolume", buf);
 
+  snprintf(buf, sizeof(buf), "%.2fV", (double)cutoffVPerCell);
+  NxSetText(NX_ST_BATT_LOW_VAL, buf);
+
   snprintf(buf, sizeof(buf), "%.1f", (double)fillPulsesPerLiter);
   NxSetText(NX_ST_FILL_PULSE_VAL, buf);
 
   snprintf(buf, sizeof(buf), "%.1f", (double)drainPulsesPerLiter);
   NxSetText(NX_ST_DRAIN_PULSE_VAL, buf);
+
+  SendStatsToStationPage();
 }
 
 // ===============================
@@ -1013,6 +1056,7 @@ void SaveStationToSD()
   f.println((int)(drainMlPerMinPerPwm * 100));  // drain factor x100
   f.println((int)(tankEmptyMinRunMs / 1000));   // stored in seconds
   f.println(nexionVolume);                       // speaker volume 0-100
+  f.println((int)(cutoffVPerCell * 100));         // batt low threshold x100
 
   f.close();
   Serial.println("SD: station saved");
@@ -1077,6 +1121,10 @@ void LoadStationFromSD()
   int vol = line.toInt();
   if (vol >= 0) nexionVolume = constrain(vol, 0, 100);
 
+  line = f.readStringUntil('\n');
+  int battLowX100 = line.toInt();
+  if (battLowX100 > 0) cutoffVPerCell = constrain(battLowX100 / 100.0f, 3.50f, 3.95f);
+
   f.close();
   Serial.println("SD: station loaded");
   Serial.print("Supply: ");
@@ -1131,6 +1179,30 @@ void UpdateMainPageModel()
 {
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
   NxSetModelImage(models[activeModelIndex].name);
+  SendModelInfoToPage();
+}
+
+// ===============================
+// SEND MODEL INFO FIELDS
+// Writes tMTankVol, tMFillSpd, tMDrainSpd, tMSensor, tMPurge
+// to whichever page is currently showing them (Main, Fill, Drain).
+// ===============================
+static void SendModelInfoToPage()
+{
+  ModelConfig &m = models[activeModelIndex];
+  char buf[32];
+
+  NxSetVal("tMTankVol", m.tankVolumeMl);
+
+  snprintf(buf, sizeof(buf), "%d ml/m", m.pumpSpeed);
+  NxSetText("tMFillSpd", buf);
+
+  snprintf(buf, sizeof(buf), "%d ml/m", m.drainSpeed);
+  NxSetText("tMDrainSpd", buf);
+
+  NxSetText("tMSensor", m.hasTankSensor ? "YES" : "NO");
+
+  NxSetVal("tMPurge", m.overflowPurgeSecs);
 }
 
 // ===============================
@@ -1270,6 +1342,7 @@ void EnterFillPage()
   NxSetText(NX_HELI_VOL_OBJ, buf);
 
   UpdateSupplyTankUI();
+  SendModelInfoToPage();
 }
 
 void RefreshFillPage()
@@ -1306,6 +1379,7 @@ void RefreshFillPage()
   UpdateSupplyTankUI();
   UpdateSupplyLowWarning();
   UpdateStopReturnButtons(PumpEnabled);
+  SendModelInfoToPage();
 }
 
 void EnterDrainPage()
@@ -1343,6 +1417,7 @@ void EnterDrainPage()
   NxSetText(NX_HELI_VOL_OBJ, buf);
 
   UpdateSupplyTankUI();
+  SendModelInfoToPage();
 }
 
 void RefreshDrainPage()
@@ -1373,6 +1448,7 @@ void RefreshDrainPage()
   UpdateSupplyTankUI();
   UpdateSupplyLowWarning();
   UpdateStopReturnButtons(PumpEnabled);
+  SendModelInfoToPage();
 }
 
 void EnterStationPage()
@@ -2068,9 +2144,9 @@ static void UpdatePowerUIAndSafety()
 
   if (!lowBatteryLatched && cellCount > 0)
   {
-    if (vPerCell_raw <= CUTOFF_V_PER_CELL)
+    if (vPerCell_raw <= cutoffVPerCell)
       { if (lowCount < 255) lowCount++; }
-    else if (vPerCell_raw >= (CUTOFF_V_PER_CELL + SAG_HYST_PER_CELL))
+    else if (vPerCell_raw >= (cutoffVPerCell + SAG_HYST_PER_CELL))
       lowCount = 0;
 
     if (lowCount >= SAG_TRIP_COUNT)
@@ -2120,6 +2196,7 @@ void ProcessNextion()
   static bool waitingForFlowDrop     = false;
   static bool waitingForEmptyDelay   = false;
   static bool waitingForVolume       = false;
+  static bool waitingForBattLow      = false;
 
   // SD sync state
   static bool    waitingForIndexSize   = false;
@@ -2248,6 +2325,20 @@ void ProcessNextion()
       NxCmd(volCmd);
       SaveStationToSD();
       UpdateStationPageValues();
+      continue;
+    }
+
+    if (waitingForBattLow)
+    {
+      waitingForBattLow = false;
+      // Value sent as integer millivolts per cell (e.g. 382 = 3.82V)
+      // User types 382, not 3.82 — keyboard covx truncates at decimal point
+      int mv = (int)constrain((int32_t)v, 350, 395);
+      cutoffVPerCell = mv / 100.0f;
+      SaveStationToSD();
+      UpdateStationPageValues();
+      Serial.print("Batt low threshold: ");
+      Serial.println((double)cutoffVPerCell);
       continue;
     }
 
@@ -2530,7 +2621,7 @@ void ProcessNextion()
       RefreshFillPage();
       // Only set default message if not already filling
       if (!PumpEnabled)
-        SetMessage("Fill Mode", NX_COLOR_BLUE);
+        SetMessage("Fill Mode", NX_COLOR_WHITE);
       continue;
     }
     if (v == NX_PAGE_REPORT_DRAIN)
@@ -2672,6 +2763,7 @@ void ProcessNextion()
     if (v == NX_CMD_SET_FLOW_DROP)   { waitingForFlowDrop   = true; continue; }
     if (v == NX_CMD_SET_EMPTY_DELAY) { waitingForEmptyDelay = true; continue; }
     if (v == NX_CMD_VOLUME) { waitingForVolume = true; continue; }
+    if (v == NX_CMD_SET_BATT_LOW)    { waitingForBattLow    = true; continue; }
 
     // ===============================
     // SD SYNC PROTOCOL
