@@ -43,6 +43,8 @@
 // NEXTION
 // ===============================
 #define NEXTION Serial1
+#define ESP32_SERIAL Serial3    // TX=pin14, RX=pin15 to ESP32
+#define ESP32_BAUD  115200
 #define NEXTION_BAUD 921600
 
 // ===============================
@@ -108,7 +110,6 @@
 #define NX_ST_FILL_STATUS     "tFillCalStatus"
 #define NX_ST_DRAIN_PULSE_VAL "tDrainPulseVal"
 #define NX_ST_DRAIN_STATUS    "tDrainCalStat"
-#define NX_ST_BATT_LOW_VAL    "tBattLowVal"
 
 // ===============================
 // PAGE STATE
@@ -144,6 +145,7 @@ bool PumpEnabled = false;
 #define NX_CMD_SELECT      4010  // Make previewed model active
 #define NX_CMD_BACK_SETUP  4020  // Back from SetupPage to MainPage
 #define NX_CMD_RESET_STATS 4025  // Reset usage stats for previewed model
+#define NX_CMD_RESET_STATION_STATS 4026  // Reset usage stats for all models
 
 // Station page command codes
 #define NX_CMD_BACK_STATION    7000
@@ -157,7 +159,6 @@ bool PumpEnabled = false;
 #define NX_CMD_SET_FLOW_DROP   7013
 #define NX_CMD_SET_EMPTY_DELAY 7014
 #define NX_CMD_VOLUME          7015
-#define NX_CMD_SET_BATT_LOW    7016
 
 // ===============================
 // SD SYNC PROTOCOL (Nextion -> Teensy)
@@ -392,10 +393,9 @@ volatile uint32_t drainPulses = 0;
 // ===============================
 Adafruit_INA219 ina219;
 
-#define CUTOFF_V_PER_CELL_DEFAULT 3.82f
+#define CUTOFF_V_PER_CELL 3.82f
 #define MAX_CURRENT_A     5.0f
 
-float cutoffVPerCell   = CUTOFF_V_PER_CELL_DEFAULT;
 int  cellCount         = 0;
 bool lowBatteryLatched = false;
 
@@ -405,8 +405,8 @@ bool lowBatteryLatched = false;
 #define BTN_DEBOUNCE_MS        50     // debounce time
 #define BTN_LONG_PRESS_MS    3000     // 3s = long press (shutdown)
 #define BTN_SHORT_PRESS_MS    200     // >200ms = intentional short press
-#define SCREEN_STANDBY_MS  120000     // 2 minutes = screen dim
-#define AUTO_SHUTDOWN_MS   300000     // 5 minutes = auto shutdown
+#define SCREEN_STANDBY_MS  600000     // 10 minutes = screen dim
+#define AUTO_SHUTDOWN_MS   900000     // 15 minutes = auto shutdown
 #define BTN_BOOT_SETUP_MS  3000       // hold 3s on boot = go to setup page
 
 static uint32_t btnPressMs       = 0;   // when button was pressed
@@ -425,6 +425,7 @@ static void UpdateLastActivity() { lastActivityMs = millis(); }
 #define SAG_HYST_PER_CELL 0.05f
 
 static float   filteredPackV = 0.0f;
+static float   filteredCurrentA = 0.0f;
 static bool    filterInit    = false;
 static uint8_t lowCount      = 0;
 
@@ -489,7 +490,6 @@ void SaveStationToSD();
 void LoadStationFromSD();
 void ApplyActiveModel();
 void UpdateMainPageModel();
-static void SendModelInfoToPage();
 static void UpdateSupplyTankUI();
 static void UpdateSupplyLowWarning();
 static void UpdateStationPageValues();
@@ -678,7 +678,7 @@ static void DetectCellCount(float packV)
 
 // Nextion colour constants
 #define NX_COLOR_WHITE       65535
-#define NX_COLOR_TXT_NORMAL  0      // tSupVol normal pco (black)
+#define NX_COLOR_TXT_NORMAL  65411  // tSupVol normal pco (yellow)
 #define NX_COLOR_RED         63488
 #define NX_COLOR_BLACK       0
 #define NX_COLOR_BLUE        1055
@@ -718,6 +718,50 @@ static void UpdateSupplyLowWarning()
 // ===============================
 // STATS HELPERS
 // ===============================
+static void SendModelParamsToPage()
+{
+  if (CurrentPage != MAINPAGE && CurrentPage != FILLPAGE && CurrentPage != DRAINPAGE) return;
+  ModelConfig &m = models[activeModelIndex];
+  char buf[16];
+
+  NxSetText("tMSensor",  m.hasTankSensor ? "YES" : "NO");
+  NxSetVal("tMTankVol",  m.tankVolumeMl);
+  snprintf(buf, sizeof(buf), "%d ml/m", m.pumpSpeed);
+  NxSetText("tMFillSpd", buf);
+  snprintf(buf, sizeof(buf), "%d ml/m", m.drainSpeed);
+  NxSetText("tMDrainSpd", buf);
+  NxSetVal("tMPurge",    m.overflowPurgeSecs);
+}
+
+static void SendStatsToStationPage()
+{
+  // Sum stats across all models
+  uint32_t totalFills   = 0;
+  uint32_t totalDrains  = 0;
+  uint32_t totalFillMl  = 0;
+  uint32_t totalDrainMl = 0;
+  for (int i = 0; i < numModels; i++)
+  {
+    totalFills   += models[i].totalFills;
+    totalDrains  += models[i].totalDrains;
+    totalFillMl  += models[i].totalFillMl;
+    totalDrainMl += models[i].totalDrainMl;
+  }
+  float netL = (totalFillMl > totalDrainMl) ? (totalFillMl - totalDrainMl) / 1000.0f : 0.0f;
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "Fills: %lu",      (unsigned long)totalFills);
+  NxSetText("tStTotalFills", buf);
+  snprintf(buf, sizeof(buf), "Drains: %lu",     (unsigned long)totalDrains);
+  NxSetText("tStTotalDrains", buf);
+  snprintf(buf, sizeof(buf), "Fill vol: %.2fL",  totalFillMl / 1000.0f);
+  NxSetText("tStFillVol", buf);
+  snprintf(buf, sizeof(buf), "Drain vol: %.2fL", totalDrainMl / 1000.0f);
+  NxSetText("tStDrainVol", buf);
+  snprintf(buf, sizeof(buf), "Fuel used: %.2fL", netL);
+  NxSetText("tStNetVol", buf);
+}
+
 static void SendStatsToSetupPage(int idx)
 {
   if (idx < 0 || idx >= numModels) return;
@@ -735,40 +779,13 @@ static void SendStatsToSetupPage(int idx)
 
   snprintf(buf, sizeof(buf), "%.2f", m.totalDrainMl / 1000.0f);
   NxSetText("tDrainVol", buf);
-}
 
-static void SendStatsToStationPage()
-{
-  uint32_t totalFills   = 0;
-  uint32_t totalDrains  = 0;
-  uint32_t totalFillMl  = 0;
-  uint32_t totalDrainMl = 0;
-
-  for (int i = 0; i < numModels; i++)
-  {
-    totalFills   += models[i].totalFills;
-    totalDrains  += models[i].totalDrains;
-    totalFillMl  += models[i].totalFillMl;
-    totalDrainMl += models[i].totalDrainMl;
-  }
-
-  char buf[40];
-
-  snprintf(buf, sizeof(buf), "Total Fills : %lu", (unsigned long)totalFills);
-  NxSetText("tStTotalFills", buf);
-
-  snprintf(buf, sizeof(buf), "Total Drains : %lu", (unsigned long)totalDrains);
-  NxSetText("tStTotalDrains", buf);
-
-  snprintf(buf, sizeof(buf), "Fill Volume (L) : %.2f", totalFillMl / 1000.0f);
-  NxSetText("tStFillVol", buf);
-
-  snprintf(buf, sizeof(buf), "Drain Volume (L) : %.2f", totalDrainMl / 1000.0f);
-  NxSetText("tStDrainVol", buf);
-
-  int32_t netMl = (int32_t)totalFillMl - (int32_t)totalDrainMl;
-  snprintf(buf, sizeof(buf), "Fuel used (L) : %.2f", netMl / 1000.0f);
-  NxSetText("tStNetVol", buf);
+  // Total net fuel used = fill - drain
+  float netL = (m.totalFillMl > m.totalDrainMl)
+               ? (m.totalFillMl - m.totalDrainMl) / 1000.0f
+               : 0.0f;
+  snprintf(buf, sizeof(buf), "%.2f", netL);
+  NxSetText("tTotalVol", buf);
 }
 
 // ===============================
@@ -847,9 +864,6 @@ static void UpdateStationPageValues()
 
   snprintf(buf, sizeof(buf), "Volume %d%%", nexionVolume);
   NxSetText("tVolume", buf);
-
-  snprintf(buf, sizeof(buf), "%.2fV", (double)cutoffVPerCell);
-  NxSetText(NX_ST_BATT_LOW_VAL, buf);
 
   snprintf(buf, sizeof(buf), "%.1f", (double)fillPulsesPerLiter);
   NxSetText(NX_ST_FILL_PULSE_VAL, buf);
@@ -1056,7 +1070,6 @@ void SaveStationToSD()
   f.println((int)(drainMlPerMinPerPwm * 100));  // drain factor x100
   f.println((int)(tankEmptyMinRunMs / 1000));   // stored in seconds
   f.println(nexionVolume);                       // speaker volume 0-100
-  f.println((int)(cutoffVPerCell * 100));         // batt low threshold x100
 
   f.close();
   Serial.println("SD: station saved");
@@ -1121,10 +1134,6 @@ void LoadStationFromSD()
   int vol = line.toInt();
   if (vol >= 0) nexionVolume = constrain(vol, 0, 100);
 
-  line = f.readStringUntil('\n');
-  int battLowX100 = line.toInt();
-  if (battLowX100 > 0) cutoffVPerCell = constrain(battLowX100 / 100.0f, 3.50f, 3.95f);
-
   f.close();
   Serial.println("SD: station loaded");
   Serial.print("Supply: ");
@@ -1165,13 +1174,15 @@ static void UpdateStopReturnButtons(bool pumpRunning)
 {
   if (CurrentPage == FILLPAGE)
   {
-    NxCmd(pumpRunning ? "vis Stop,1"    : "vis Stop,0");
-    NxCmd(pumpRunning ? "vis bReturn,0" : "vis bReturn,1");
+    NxCmd(pumpRunning ? "vis Stop,1"          : "vis Stop,0");
+    NxCmd(pumpRunning ? "vis bReturn,0"       : "vis bReturn,1");
+    NxCmd(pumpRunning ? "vis BtnStartFill,0"  : "vis BtnStartFill,1");
   }
   else if (CurrentPage == DRAINPAGE)
   {
-    NxCmd(pumpRunning ? "vis Stop,1"    : "vis Stop,0");
-    NxCmd(pumpRunning ? "vis bReturn,0" : "vis bReturn,1");
+    NxCmd(pumpRunning ? "vis Stop,1"          : "vis Stop,0");
+    NxCmd(pumpRunning ? "vis bReturn,0"       : "vis bReturn,1");
+    NxCmd(pumpRunning ? "vis BtnStartDrain,0" : "vis BtnStartDrain,1");
   }
 }
 
@@ -1179,30 +1190,171 @@ void UpdateMainPageModel()
 {
   NxSetText(NX_ACTIVE_MODEL_OBJ, models[activeModelIndex].name);
   NxSetModelImage(models[activeModelIndex].name);
-  SendModelInfoToPage();
+  SendModelParamsToPage();
 }
 
 // ===============================
-// SEND MODEL INFO FIELDS
-// Writes tMTankVol, tMFillSpd, tMDrainSpd, tMSensor, tMPurge
-// to whichever page is currently showing them (Main, Fill, Drain).
+// ESP32 STATE BROADCASTER
+// Sends JSON state to ESP32 over Serial2
 // ===============================
-static void SendModelInfoToPage()
+static void BroadcastStateToESP32()
 {
   ModelConfig &m = models[activeModelIndex];
-  char buf[32];
+  static char json[768];
 
-  NxSetVal("tMTankVol", m.tankVolumeMl);
+  int supplyPct = (supplyTankCapacityMl > 0)
+                  ? (int)(100.0f * supplyTankRemainingMl / supplyTankCapacityMl)
+                  : 0;
 
-  snprintf(buf, sizeof(buf), "%d ml/m", m.pumpSpeed);
-  NxSetText("tMFillSpd", buf);
+  snprintf(json, sizeof(json),
+    "WS:{"
+    "\"page\":%d,"
+    "\"version\":\"%s\","
+    "\"modelName\":\"%s\","
+    "\"tankVol\":%d,"
+    "\"sensor\":\"%s\","
+    "\"fillSpd\":\"%d ml/m\","
+    "\"drainSpd\":\"%d ml/m\","
+    "\"supplyPct\":%d,"
+    "\"supplyMl\":%d,"
+    "\"supplyCapMl\":%d,"
+    "\"supplyLow\":%s,"
+    "\"fillFlow\":%d,"
+    "\"fillVol\":%d,"
+    "\"fillTarget\":%d,"
+    "\"fillPct\":%d,"
+    "\"heliVol\":\"%d / %dml\","
+    "\"drainFlow\":%d,"
+    "\"drainVol\":%d,"
+    "\"drainPct\":%d,"
+    "\"pumpOn\":%s,"
+    "\"battType\":\"%s\","
+    "\"packV\":\"%.2f\","
+    "\"currentA\":\"%.1f\","
+    "\"activeModel\":%d,"
+    "\"previewModel\":%d"
+    "}",
+    (int)CurrentPage,
+    FW_VERSION,
+    m.name,
+    m.tankVolumeMl,
+    m.hasTankSensor ? "YES" : "NO",
+    m.pumpSpeed,
+    m.drainSpeed,
+    supplyPct,
+    supplyTankRemainingMl,
+    supplyTankCapacityMl,
+    (supplyTankRemainingMl <= supplyLowThresholdMl) ? "true" : "false",
+    gFillUi.lastSentFlow > 0 ? gFillUi.lastSentFlow : 0,
+    lastFillVolumeMl,
+    targetFillMl,
+    (targetFillMl > 0) ? (int)(100.0f * lastFillVolumeMl / targetFillMl) : 0,
+    lastFillVolumeMl, targetFillMl,
+    gDrainUi.lastSentFlow > 0 ? gDrainUi.lastSentFlow : 0,
+    lastDrainVolumeMl,
+    (m.tankVolumeMl > 0) ? (int)(100.0f * lastDrainVolumeMl / m.tankVolumeMl) : 0,
+    PumpEnabled ? "true" : "false",
+    cellCount == 3 ? "3S Battery" : cellCount == 2 ? "2S Battery" : "—",
+    (double)filteredPackV,
+    (double)filteredCurrentA,
+    activeModelIndex,
+    previewModelIndex
+  );
 
-  snprintf(buf, sizeof(buf), "%d ml/m", m.drainSpeed);
-  NxSetText("tMDrainSpd", buf);
+  ESP32_SERIAL.println(json);
 
-  NxSetText("tMSensor", m.hasTankSensor ? "YES" : "NO");
+  // Send model list every 2 seconds
+  static uint32_t lastModelSendMs = 0;
+  if (millis() - lastModelSendMs >= 2000)
+  {
+    lastModelSendMs = millis();
+    static char modelJson[384];
+    static char modelsBuf[256];
+    modelsBuf[0] = '[';
+    modelsBuf[1] = 0;
+    for (int i = 0; i < numModels; i++)
+    {
+      char mb[64];
+      snprintf(mb, sizeof(mb), "%s{\"name\":\"%s\",\"totalFills\":%lu}",
+               i > 0 ? "," : "",
+               models[i].name,
+               (unsigned long)models[i].totalFills);
+      strncat(modelsBuf, mb, sizeof(modelsBuf) - strlen(modelsBuf) - 1);
+    }
+    strncat(modelsBuf, "]", sizeof(modelsBuf) - strlen(modelsBuf) - 1);
+    snprintf(modelJson, sizeof(modelJson), "WS:{\"models\":%s}", modelsBuf);
+    ESP32_SERIAL.println(modelJson);
+  }
 
-  NxSetVal("tMPurge", m.overflowPurgeSecs);
+  // Send setup model stats every 1 second
+  static uint32_t lastSetupSendMs = 0;
+  if (millis() - lastSetupSendMs >= 1000)
+  {
+    lastSetupSendMs = millis();
+    ModelConfig &pm = models[previewModelIndex];
+    static char setupJson[384];
+    float netL = (pm.totalFillMl > pm.totalDrainMl) ? (pm.totalFillMl - pm.totalDrainMl) / 1000.0f : 0.0f;
+    snprintf(setupJson, sizeof(setupJson),
+      "WS:{\"setupStats\":{"
+      "\"purge\":%d,"
+      "\"totalFills\":%lu,"
+      "\"totalDrains\":%lu,"
+      "\"totalFillVol\":\"%.2f\","
+      "\"totalDrainVol\":\"%.2f\","
+      "\"totalVol\":\"%.2f\""
+      "}}",
+      pm.overflowPurgeSecs,
+      (unsigned long)pm.totalFills,
+      (unsigned long)pm.totalDrains,
+      pm.totalFillMl / 1000.0f,
+      pm.totalDrainMl / 1000.0f,
+      netL
+    );
+    ESP32_SERIAL.println(setupJson);
+  }
+
+  // Send station data every 2 seconds
+  static uint32_t lastStationSendMs = 0;
+  if (millis() - lastStationSendMs >= 2000)
+  {
+    lastStationSendMs = millis();
+    uint32_t stFills=0, stDrains=0, stFillMl=0, stDrainMl=0;
+    for (int i = 0; i < numModels; i++) {
+      stFills   += models[i].totalFills;
+      stDrains  += models[i].totalDrains;
+      stFillMl  += models[i].totalFillMl;
+      stDrainMl += models[i].totalDrainMl;
+    }
+    float stNet = (stFillMl > stDrainMl) ? (stFillMl - stDrainMl) / 1000.0f : 0.0f;
+    static char stJson[384];
+    snprintf(stJson, sizeof(stJson),
+      "WS:{\"station\":{"
+      "\"cap\":\"%.1fL\","
+      "\"rem\":\"%.1fL\","
+      "\"low\":\"%.1fL\","
+      "\"fillCal\":\"%.1f\","
+      "\"drainCal\":\"%.1f\","
+      "\"volume\":\"%d%%\","
+      "\"totalFills\":\"%lu\","
+      "\"totalDrains\":\"%lu\","
+      "\"fillVol\":\"%.2fL\","
+      "\"drainVol\":\"%.2fL\","
+      "\"netVol\":\"%.2fL\""
+      "}}",
+      supplyTankCapacityMl / 1000.0f,
+      supplyTankRemainingMl / 1000.0f,
+      supplyLowThresholdMl / 1000.0f,
+      (double)fillPulsesPerLiter,
+      (double)drainPulsesPerLiter,
+      nexionVolume,
+      (unsigned long)stFills,
+      (unsigned long)stDrains,
+      stFillMl / 1000.0f,
+      stDrainMl / 1000.0f,
+      stNet
+    );
+    ESP32_SERIAL.println(stJson);
+  }
 }
 
 // ===============================
@@ -1342,7 +1494,6 @@ void EnterFillPage()
   NxSetText(NX_HELI_VOL_OBJ, buf);
 
   UpdateSupplyTankUI();
-  SendModelInfoToPage();
 }
 
 void RefreshFillPage()
@@ -1379,7 +1530,7 @@ void RefreshFillPage()
   UpdateSupplyTankUI();
   UpdateSupplyLowWarning();
   UpdateStopReturnButtons(PumpEnabled);
-  SendModelInfoToPage();
+  SendModelParamsToPage();
 }
 
 void EnterDrainPage()
@@ -1417,7 +1568,6 @@ void EnterDrainPage()
   NxSetText(NX_HELI_VOL_OBJ, buf);
 
   UpdateSupplyTankUI();
-  SendModelInfoToPage();
 }
 
 void RefreshDrainPage()
@@ -1448,7 +1598,7 @@ void RefreshDrainPage()
   UpdateSupplyTankUI();
   UpdateSupplyLowWarning();
   UpdateStopReturnButtons(PumpEnabled);
-  SendModelInfoToPage();
+  SendModelParamsToPage();
 }
 
 void EnterStationPage()
@@ -1492,6 +1642,7 @@ void BeginFill(int pwm)
   PumpEnabled = true;
   SetMessage("Filling", NX_COLOR_BLUE);
   UpdateStopReturnButtons(true);
+  NxCmd("vis BtnStartFill,0");
 
   NEXTION.flush();  // drain serial buffer before pump starts
 
@@ -1523,6 +1674,7 @@ void BeginDrain(int pwm)
   PumpDriverEnable();
   PumpEnabled = true;
   UpdateStopReturnButtons(true);
+  NxCmd("vis BtnStartDrain,0");
 
   NEXTION.flush();  // drain serial buffer before pump starts
 
@@ -2098,6 +2250,7 @@ static void UpdatePowerUIAndSafety()
   float shuntmV   = ina219.getShuntVoltage_mV();
   float packV_raw = busV + (shuntmV / 1000.0f);
   float currentA  = fabs(ina219.getCurrent_mA() / 1000.0f);
+  filteredCurrentA = currentA;
 
   if (!filterInit) { filteredPackV = packV_raw; filterInit = true; }
   else filteredPackV = filteredPackV + SAG_FILTER_ALPHA * (packV_raw - filteredPackV);
@@ -2144,9 +2297,9 @@ static void UpdatePowerUIAndSafety()
 
   if (!lowBatteryLatched && cellCount > 0)
   {
-    if (vPerCell_raw <= cutoffVPerCell)
+    if (vPerCell_raw <= CUTOFF_V_PER_CELL)
       { if (lowCount < 255) lowCount++; }
-    else if (vPerCell_raw >= (cutoffVPerCell + SAG_HYST_PER_CELL))
+    else if (vPerCell_raw >= (CUTOFF_V_PER_CELL + SAG_HYST_PER_CELL))
       lowCount = 0;
 
     if (lowCount >= SAG_TRIP_COUNT)
@@ -2196,7 +2349,6 @@ void ProcessNextion()
   static bool waitingForFlowDrop     = false;
   static bool waitingForEmptyDelay   = false;
   static bool waitingForVolume       = false;
-  static bool waitingForBattLow      = false;
 
   // SD sync state
   static bool    waitingForIndexSize   = false;
@@ -2325,20 +2477,6 @@ void ProcessNextion()
       NxCmd(volCmd);
       SaveStationToSD();
       UpdateStationPageValues();
-      continue;
-    }
-
-    if (waitingForBattLow)
-    {
-      waitingForBattLow = false;
-      // Value sent as integer millivolts per cell (e.g. 382 = 3.82V)
-      // User types 382, not 3.82 — keyboard covx truncates at decimal point
-      int mv = (int)constrain((int32_t)v, 350, 395);
-      cutoffVPerCell = mv / 100.0f;
-      SaveStationToSD();
-      UpdateStationPageValues();
-      Serial.print("Batt low threshold: ");
-      Serial.println((double)cutoffVPerCell);
       continue;
     }
 
@@ -2621,7 +2759,7 @@ void ProcessNextion()
       RefreshFillPage();
       // Only set default message if not already filling
       if (!PumpEnabled)
-        SetMessage("Fill Mode", NX_COLOR_WHITE);
+        SetMessage("Fill Mode", NX_COLOR_BLUE);
       continue;
     }
     if (v == NX_PAGE_REPORT_DRAIN)
@@ -2728,6 +2866,20 @@ void ProcessNextion()
       continue;
     }
 
+    if (v == NX_CMD_RESET_STATION_STATS)
+    {
+      for (int i = 0; i < numModels; i++)
+      {
+        models[i].totalFills   = 0;
+        models[i].totalDrains  = 0;
+        models[i].totalFillMl  = 0;
+        models[i].totalDrainMl = 0;
+        SaveOneModelToSD(i);
+      }
+      SendStatsToStationPage();
+      continue;
+    }
+
 
     if (v == NX_CMD_STATION) { EnterStationPage(); continue; }
 
@@ -2763,7 +2915,6 @@ void ProcessNextion()
     if (v == NX_CMD_SET_FLOW_DROP)   { waitingForFlowDrop   = true; continue; }
     if (v == NX_CMD_SET_EMPTY_DELAY) { waitingForEmptyDelay = true; continue; }
     if (v == NX_CMD_VOLUME) { waitingForVolume = true; continue; }
-    if (v == NX_CMD_SET_BATT_LOW)    { waitingForBattLow    = true; continue; }
 
     // ===============================
     // SD SYNC PROTOCOL
@@ -3062,6 +3213,7 @@ void setup()
 {
   Serial.begin(115200);
   delay(200);
+  ESP32_SERIAL.begin(ESP32_BAUD);
 
   Serial.print("\nFuel Pump Controller ");
   Serial.print(FW_VERSION);
@@ -3166,5 +3318,50 @@ void loop()
   {
     modelUpdatePending = false;
     if (CurrentPage == SETUPPAGE) SendModelToSetupPage(previewModelIndex);
+  }
+
+  // Broadcast state to ESP32 every 250ms
+  static uint32_t lastBroadcastMs = 0;
+  if (millis() - lastBroadcastMs >= 250)
+  {
+    lastBroadcastMs = millis();
+    BroadcastStateToESP32();
+  }
+
+  // Read commands from ESP32
+  static String esp32Buf = "";
+  static bool esp32WaitingForModelIdx = false;
+  while (ESP32_SERIAL.available())
+  {
+    char c = ESP32_SERIAL.read();
+    if (c == '\n')
+    {
+      esp32Buf.trim();
+      if (esp32Buf.startsWith("CMD:"))
+      {
+        int val = esp32Buf.substring(4).toInt();
+        if (esp32WaitingForModelIdx)
+        {
+          esp32WaitingForModelIdx = false;
+          int idx = constrain(val, 0, numModels - 1);
+          previewModelIndex = idx;
+          activeModelIndex  = idx;
+          ApplyActiveModel();
+          SendModelToSetupPage(idx);
+        }
+        else if (val == 8020) { esp32WaitingForModelIdx = true; }
+        else if (val == 1)    { EnterFillPage(); }
+        else if (val == 2)    { EnterDrainPage(); }
+        else if (val == 3)    { autoFillSequence = AF_NONE; if (PumpEnabled) StopPumpInPlace(); else StopPump(); }
+        else if (val == 11)   { if (CurrentPage == FILLPAGE) { if (!models[activeModelIndex].hasTankSensor) BeginAutoSequenceDrain(); else BeginFill(mlPerMinPerPwm > 0.0f ? MlMinToPwm(models[activeModelIndex].pumpSpeed) : MIN_PWM); } }
+        else if (val == 12)   { if (CurrentPage == DRAINPAGE) BeginDrain(drainMlPerMinPerPwm > 0.0f ? DrainMlMinToPwm(models[activeModelIndex].drainSpeed) : MIN_PWM); }
+        else if (val == 4000) { CurrentPage = SETUPPAGE; NxGotoPage(PAGE_SETUP); }
+        else if (val == 4010) { activeModelIndex = previewModelIndex; ApplyActiveModel(); }
+        else if (val == 4020) { activeModelIndex = previewModelIndex; ApplyActiveModel(); CurrentPage = MAINPAGE; NxGotoPage(PAGE_MAIN); }
+        else if (val == 4030) { EnterStationPage(); }
+      }
+      esp32Buf = "";
+    }
+    else { esp32Buf += c; }
   }
 }
