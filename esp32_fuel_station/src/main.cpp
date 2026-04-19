@@ -559,9 +559,14 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
         <div class="progress-fill green" id="main-supply-bar" style="width:0%"></div>
       </div>
     </div>
-    <div class="val-row">
-      <span class="val-label">Battery</span>
-      <span class="val-value" id="main-batt-type">—</span>
+    <div class="progress-wrap">
+      <div class="progress-label">
+        <span id="main-batt-type">—</span>
+        <span id="main-batt-pct">—</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill green" id="main-batt-bar" style="width:0%"></div>
+      </div>
     </div>
     <div class="val-row">
       <span class="val-label">Pack voltage</span>
@@ -634,9 +639,14 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
         <div class="progress-fill green" id="fill-supply-bar" style="width:0%"></div>
       </div>
     </div>
-    <div class="val-row">
-      <span class="val-label">Battery</span>
-      <span class="val-value" id="fill-batt-type">—</span>
+    <div class="progress-wrap">
+      <div class="progress-label">
+        <span id="fill-batt-type">—</span>
+        <span id="fill-batt-pct">—</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill green" id="fill-batt-bar" style="width:0%"></div>
+      </div>
     </div>
     <div class="val-row">
       <span class="val-label">Pack voltage</span>
@@ -701,9 +711,14 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
         <div class="progress-fill green" id="drain-supply-bar" style="width:0%"></div>
       </div>
     </div>
-    <div class="val-row">
-      <span class="val-label">Battery</span>
-      <span class="val-value" id="drain-batt-type">—</span>
+    <div class="progress-wrap">
+      <div class="progress-label">
+        <span id="drain-batt-type">—</span>
+        <span id="drain-batt-pct">—</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill green" id="drain-batt-bar" style="width:0%"></div>
+      </div>
     </div>
     <div class="val-row">
       <span class="val-label">Pack voltage</span>
@@ -782,10 +797,16 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
 <!-- ═══════════════════════════════════ STATION PAGE ════════════════════════ -->
 <div id="page-station" class="page">
   <div class="card">
-    <div class="card-title">Supply Tank</div>
-    <div class="val-row"><span class="val-label">Capacity</span><span class="val-value accent" id="st-cap">—</span></div>
+    <div class="card-title">Supply Tank <span style="font-size:10px;color:var(--text2);font-weight:400">tap to edit</span></div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptStation('cap','Supply Capacity (L)',0.1,100)" onclick="promptStation('cap','Supply Capacity (L)',0.1,100)">
+      <span class="val-label">Capacity</span>
+      <span class="val-value accent" id="st-cap">—</span>
+    </div>
     <div class="val-row"><span class="val-label">Remaining</span><span class="val-value green" id="st-rem">—</span></div>
-    <div class="val-row"><span class="val-label">Low threshold</span><span class="val-value yellow" id="st-low">—</span></div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptStation('low','Low Threshold (L)',0,100)" onclick="promptStation('low','Low Threshold (L)',0,100)">
+      <span class="val-label">Low threshold</span>
+      <span class="val-value accent" id="st-low">—</span>
+    </div>
   </div>
 
   <div class="card">
@@ -798,18 +819,67 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
   </div>
 
   <div class="card">
-    <div class="card-title">Calibration</div>
-    <div class="val-row"><span class="val-label">Fill pulses/L</span><span class="val-value" id="st-fill-cal">—</span></div>
-    <div class="val-row"><span class="val-label">Drain pulses/L</span><span class="val-value" id="st-drain-cal">—</span></div>
-    <div class="val-row"><span class="val-label">Volume</span><span class="val-value accent" id="st-volume">—</span></div>
+    <div class="card-title">Calibration <span style="font-size:10px;color:var(--text2);font-weight:400">tap to edit</span></div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptStation('fillCal','Fill Pulses/L',1,9999)" onclick="promptStation('fillCal','Fill Pulses/L',1,9999)">
+      <span class="val-label">Fill pulses/L</span>
+      <span class="val-value accent" id="st-fill-cal">—</span>
+    </div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptStation('drainCal','Drain Pulses/L',1,9999)" onclick="promptStation('drainCal','Drain Pulses/L',1,9999)">
+      <span class="val-label">Drain pulses/L</span>
+      <span class="val-value accent" id="st-drain-cal">—</span>
+    </div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptStation('flowDrop','Flow Drop % (tank empty detect)',1,99)" onclick="promptStation('flowDrop','Flow Drop % (tank empty detect)',1,99)">
+      <span class="val-label">Flow drop %</span>
+      <span class="val-value accent" id="st-flow-drop">—</span>
+    </div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptStation('emptyDelay','Empty Delay (seconds)',1,30)" onclick="promptStation('emptyDelay','Empty Delay (seconds)',1,30)">
+      <span class="val-label">Empty delay</span>
+      <span class="val-value accent" id="st-empty-delay">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🔧 Flow Sensor Calibration</div>
+
+    <div style="margin-bottom:12px">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">FILL SENSOR</div>
+      <div class="val-row"><span class="val-label">Status</span><span class="val-value" id="cal-fill-status">Idle</span></div>
+      <div class="val-row"><span class="val-label">Pulses</span><span class="val-value accent" id="cal-fill-pulses">0</span></div>
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn btn-start" id="btn-fill-cal-start" ontouchstart="event.preventDefault();startFillCal()" onclick="startFillCal()">START</button>
+        <button type="button" class="btn btn-stop"  id="btn-fill-cal-stop"  ontouchstart="event.preventDefault();stopFillCal()"  onclick="stopFillCal()" style="display:none">STOP</button>
+      </div>
+      <div id="fill-cal-vol-row" style="display:none;margin-top:8px">
+        <div style="font-size:11px;color:var(--yellow);margin-bottom:6px">Enter actual volume collected (ml):</div>
+        <div style="display:flex;gap:8px">
+          <input type="number" id="fill-cal-vol-input" style="flex:1;background:var(--panel2);border:1px solid var(--accent);border-radius:8px;color:var(--text);font-size:16px;padding:8px;outline:none" placeholder="ml">
+          <button type="button" class="btn btn-start" style="flex:0 0 80px" ontouchstart="event.preventDefault();confirmFillCal()" onclick="confirmFillCal()">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="border-top:1px solid var(--border);padding-top:12px">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:8px">DRAIN SENSOR</div>
+      <div class="val-row"><span class="val-label">Status</span><span class="val-value" id="cal-drain-status">Idle</span></div>
+      <div class="val-row"><span class="val-label">Pulses</span><span class="val-value accent" id="cal-drain-pulses">0</span></div>
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn btn-start" id="btn-drain-cal-start" ontouchstart="event.preventDefault();startDrainCal()" onclick="startDrainCal()">START</button>
+        <button type="button" class="btn btn-stop"  id="btn-drain-cal-stop"  ontouchstart="event.preventDefault();stopDrainCal()"  onclick="stopDrainCal()" style="display:none">STOP</button>
+      </div>
+      <div id="drain-cal-vol-row" style="display:none;margin-top:8px">
+        <div style="font-size:11px;color:var(--yellow);margin-bottom:6px">Enter actual volume collected (ml):</div>
+        <div style="display:flex;gap:8px">
+          <input type="number" id="drain-cal-vol-input" style="flex:1;background:var(--panel2);border:1px solid var(--accent);border-radius:8px;color:var(--text);font-size:16px;padding:8px;outline:none" placeholder="ml">
+          <button type="button" class="btn btn-start" style="flex:0 0 80px" ontouchstart="event.preventDefault();confirmDrainCal()" onclick="confirmDrainCal()">OK</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="btn-row">
     <button class="btn btn-back" onclick="sendCmd(4020)">BACK</button>
   </div>
 </div>
-
-<!-- ═══════════════════════════════════ LOW BAT PAGE ════════════════════════ -->
 <div id="page-lowbat" class="page">
   <div id="lowbat-icon">🔋</div>
   <div class="card">
@@ -821,7 +891,115 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
 </div>
 
 <script>
-// ── Setup editing ─────────────────────────────────────────────────────────────
+// ── Calibration ───────────────────────────────────────────────────────────────
+let fillCalRunning = false;
+let drainCalRunning = false;
+
+function startFillCal() {
+  if (drainCalRunning) { alert('Stop drain calibration first'); return; }
+  sendCmd(7030);
+  fillCalRunning = true;
+  set('cal-fill-status', 'Running — collect fuel then press STOP');
+  document.getElementById('btn-fill-cal-start').style.display = 'none';
+  document.getElementById('btn-fill-cal-stop').style.display = '';
+  document.getElementById('fill-cal-vol-row').style.display = 'none';
+}
+
+function stopFillCal() {
+  sendCmd(7031);
+  fillCalRunning = false;
+  set('cal-fill-status', 'Stopped — enter actual volume below');
+  document.getElementById('btn-fill-cal-stop').style.display = 'none';
+  document.getElementById('fill-cal-vol-row').style.display = '';
+  setTimeout(() => document.getElementById('fill-cal-vol-input').focus(), 150);
+}
+
+function confirmFillCal() {
+  const val = parseInt(document.getElementById('fill-cal-vol-input').value);
+  if (isNaN(val) || val <= 0) { alert('Enter a valid volume in ml'); return; }
+  sendCmd(7032);
+  setTimeout(() => {
+    sendCmd(val);
+    document.getElementById('fill-cal-vol-row').style.display = 'none';
+    document.getElementById('btn-fill-cal-start').style.display = '';
+    document.getElementById('fill-cal-vol-input').value = '';
+    set('cal-fill-status', 'Complete ✓');
+  }, 150);
+}
+
+function startDrainCal() {
+  if (fillCalRunning) { alert('Stop fill calibration first'); return; }
+  sendCmd(7033);
+  drainCalRunning = true;
+  set('cal-drain-status', 'Running — collect fuel then press STOP');
+  document.getElementById('btn-drain-cal-start').style.display = 'none';
+  document.getElementById('btn-drain-cal-stop').style.display = '';
+  document.getElementById('drain-cal-vol-row').style.display = 'none';
+}
+
+function stopDrainCal() {
+  sendCmd(7034);
+  drainCalRunning = false;
+  set('cal-drain-status', 'Stopped — enter actual volume below');
+  document.getElementById('btn-drain-cal-stop').style.display = 'none';
+  document.getElementById('drain-cal-vol-row').style.display = '';
+  setTimeout(() => document.getElementById('drain-cal-vol-input').focus(), 150);
+}
+
+function confirmDrainCal() {
+  const val = parseInt(document.getElementById('drain-cal-vol-input').value);
+  if (isNaN(val) || val <= 0) { alert('Enter a valid volume in ml'); return; }
+  sendCmd(7035);
+  setTimeout(() => {
+    sendCmd(val);
+    document.getElementById('drain-cal-vol-row').style.display = 'none';
+    document.getElementById('btn-drain-cal-start').style.display = '';
+    document.getElementById('drain-cal-vol-input').value = '';
+    set('cal-drain-status', 'Complete ✓');
+  }, 150);
+}
+
+// ── Station editing ───────────────────────────────────────────────────────────
+const station_vals = { cap: 0, low: 0, fillCal: 0, drainCal: 0, flowDrop: 0, emptyDelay: 0 };
+
+function promptStation(param, title, min, max) {
+  const current = station_vals[param] !== undefined ? station_vals[param] : '';
+  const result = prompt(title + '\nCurrent: ' + current, current);
+  if (result === null) return;
+  // Use parseFloat for L values
+  const n = (param === 'cap' || param === 'low') ? parseFloat(result) : parseInt(result);
+  if (isNaN(n)) return;
+  const clamped = Math.max(min, Math.min(max, n));
+  // Convert L to ml for cap and low before sending
+  const sendVal = (param === 'cap' || param === 'low') ? Math.round(clamped * 1000) : clamped;
+  const cmdMap = {
+    cap:        7010,
+    low:        7012,
+    flowDrop:   7013,
+    emptyDelay: 7014,
+    fillCal:    7020,
+    drainCal:   7021
+  };
+  const cmd = cmdMap[param];
+  if (cmd) {
+    sendCmd(cmd);
+    setTimeout(() => sendCmd(sendVal), 150);
+    station_vals[param] = clamped;
+    // Update display
+    const dispMap = {
+      cap:        'st-cap',
+      low:        'st-low',
+      flowDrop:   'st-flow-drop',
+      emptyDelay: 'st-empty-delay',
+      fillCal:    'st-fill-cal',
+      drainCal:   'st-drain-cal'
+    };
+    const suffixMap = {
+      cap: 'L', low: 'L', flowDrop: '%', emptyDelay: 's', fillCal: '', drainCal: ''
+    };
+    set(dispMap[param], clamped + (suffixMap[param] || ''));
+  }
+}
 const setup_vals = { tankVol: 0, fillSpd: 500, drainSpd: 500, sensor: 'NO', purge: 3 };
 
 function promptEdit(param, title, min, max) {
@@ -968,6 +1146,16 @@ function updateUI(s) {
     set('fill-batt-type', s.battType);
     set('drain-batt-type', s.battType);
   }
+  if (s.battPct !== undefined) {
+    const pct = s.battPct;
+    const pctTxt = pct + '%';
+    set('main-batt-pct',  pctTxt);
+    set('fill-batt-pct',  pctTxt);
+    set('drain-batt-pct', pctTxt);
+    setBar('main-batt-bar',  pct, false);
+    setBar('fill-batt-bar',  pct, false);
+    setBar('drain-batt-bar', pct, false);
+  }
   if (s.packV) {
     set('main-packv', s.packV + 'V');
     set('fill-packv', s.packV + 'V');
@@ -1083,19 +1271,37 @@ function updateUI(s) {
     set('st-fill-cal',     s.station.fillCal);
     set('st-drain-cal',    s.station.drainCal);
     set('st-volume',       s.station.volume);
+    set('st-flow-drop',    s.station.flowDrop);
+    set('st-empty-delay',  s.station.emptyDelay);
     set('st-total-fills',  s.station.totalFills);
     set('st-total-drains', s.station.totalDrains);
     set('st-fill-vol',     s.station.fillVol);
     set('st-drain-vol',    s.station.drainVol);
     set('st-net-vol',      s.station.netVol);
+    // Store raw values for editing
+    station_vals.cap        = s.station.capMl        ? s.station.capMl / 1000        : parseFloat(s.station.cap)  || 0;
+    station_vals.low        = s.station.lowMl        ? s.station.lowMl / 1000        : parseFloat(s.station.low)  || 0;
+    station_vals.fillCal    = s.station.fillCalRaw   || parseFloat(s.station.fillCal)  || 0;
+    station_vals.drainCal   = s.station.drainCalRaw  || parseFloat(s.station.drainCal) || 0;
+    station_vals.flowDrop   = s.station.flowDropRaw  || parseInt(s.station.flowDrop)   || 0;
+    station_vals.emptyDelay = s.station.emptyDelayRaw|| parseInt(s.station.emptyDelay) || 0;
+  }
+
+  // ── Calibration live updates ──
+  if (s.fillCalPulses !== undefined) {
+    set('cal-fill-pulses', s.fillCalPulses);
+  }
+  if (s.drainCalPulses !== undefined) {
+    set('cal-drain-pulses', s.drainCalPulses);
   }
 
   // ── Low battery page ──
   if (s.lowBat) {
-    set('lb-packv', s.lowBat.packV + 'V');
-    set('lb-cellv', s.lowBat.cellV + 'V');
-    set('lb-cells', s.lowBat.cells);
+    set('lb-packv', s.packV + 'V');
+    set('lb-cellv', s.cellV + 'V');
+    set('lb-cells', s.cellCount + ' cell');
     document.getElementById('nav-lowbat').style.display = '';
+    if (currentPage !== 'lowbat') showPage('lowbat');
   }
 }
 

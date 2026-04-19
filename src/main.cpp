@@ -176,6 +176,12 @@ bool PumpEnabled = false;
 #define NX_CMD_SD_MODEL_NAME   8010  // Nextion sending: model name follows as string bytes
 #define NX_CMD_FILL_CAL_VOL    7020
 #define NX_CMD_DRAIN_CAL_VOL   7021
+#define ESP32_CMD_FILL_CAL_START  7030
+#define ESP32_CMD_FILL_CAL_STOP   7031
+#define ESP32_CMD_FILL_CAL_VOL    7032
+#define ESP32_CMD_DRAIN_CAL_START 7033
+#define ESP32_CMD_DRAIN_CAL_STOP  7034
+#define ESP32_CMD_DRAIN_CAL_VOL   7035
 
 // Calibration pump speed (fixed)
 #define CAL_PWM 100  // safe calibration speed with ramp
@@ -1235,9 +1241,17 @@ static void BroadcastStateToESP32()
     "\"drainVol\":%d,"
     "\"drainPct\":%d,"
     "\"pumpOn\":%s,"
+    "\"fillCalActive\":%s,"
+    "\"drainCalActive\":%s,"
+    "\"fillCalPulses\":%lu,"
+    "\"drainCalPulses\":%lu,"
     "\"battType\":\"%s\","
     "\"packV\":\"%.2f\","
+    "\"battPct\":%d,"
     "\"currentA\":\"%.1f\","
+    "\"lowBat\":%s,"
+    "\"cellCount\":%d,"
+    "\"cellV\":\"%.2f\","
     "\"message\":\"%s\","
     "\"msgColor\":\"%s\","
     "\"activeModel\":%d,"
@@ -1263,9 +1277,17 @@ static void BroadcastStateToESP32()
     lastDrainVolumeMl,
     (m.tankVolumeMl > 0) ? (int)(100.0f * lastDrainVolumeMl / m.tankVolumeMl) : 0,
     PumpEnabled ? "true" : "false",
+    fillCalActive  ? "true" : "false",
+    drainCalActive ? "true" : "false",
+    (unsigned long)fillPulses,
+    (unsigned long)drainPulses,
     cellCount == 3 ? "3S Battery" : cellCount == 2 ? "2S Battery" : "—",
     (double)filteredPackV,
+    (cellCount > 0) ? LiPoPctFromV(filteredPackV / (float)cellCount) : 0,
     (double)filteredCurrentA,
+    lowBatteryLatched ? "true" : "false",
+    cellCount,
+    (cellCount > 0) ? (double)(filteredPackV / (float)cellCount) : 0.0,
     currentMessage,
     currentMsgColor,
     activeModelIndex,
@@ -1343,9 +1365,18 @@ static void BroadcastStateToESP32()
       "\"cap\":\"%.1fL\","
       "\"rem\":\"%.1fL\","
       "\"low\":\"%.1fL\","
+      "\"capMl\":%d,"
+      "\"lowMl\":%d,"
       "\"fillCal\":\"%.1f\","
       "\"drainCal\":\"%.1f\","
+      "\"fillCalRaw\":%.1f,"
+      "\"drainCalRaw\":%.1f,"
       "\"volume\":\"%d%%\","
+      "\"volumeRaw\":%d,"
+      "\"flowDrop\":\"%d%%\","
+      "\"flowDropRaw\":%d,"
+      "\"emptyDelay\":\"%ds\","
+      "\"emptyDelayRaw\":%d,"
       "\"totalFills\":\"%lu\","
       "\"totalDrains\":\"%lu\","
       "\"fillVol\":\"%.2fL\","
@@ -1355,9 +1386,18 @@ static void BroadcastStateToESP32()
       supplyTankCapacityMl / 1000.0f,
       supplyTankRemainingMl / 1000.0f,
       supplyLowThresholdMl / 1000.0f,
+      supplyTankCapacityMl,
+      supplyLowThresholdMl,
+      (double)fillPulsesPerLiter,
+      (double)drainPulsesPerLiter,
       (double)fillPulsesPerLiter,
       (double)drainPulsesPerLiter,
       nexionVolume,
+      nexionVolume,
+      tankEmptyFlowDropPct,
+      tankEmptyFlowDropPct,
+      (int)(tankEmptyMinRunMs / 1000),
+      (int)(tankEmptyMinRunMs / 1000),
       (unsigned long)stFills,
       (unsigned long)stDrains,
       stFillMl / 1000.0f,
@@ -3374,8 +3414,52 @@ void loop()
           else if (cmd == 6003) { models[previewModelIndex].hasTankSensor = (val == 1); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
           else if (cmd == 6004) { models[previewModelIndex].overflowPurgeSecs = constrain(val, 0, 10); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
           else if (cmd == 6005) { models[previewModelIndex].drainSpeed = constrain(val, 0, 1000); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
+          else if (cmd == 7010) { supplyTankCapacityMl  = constrain(val, 0, 99999); SaveStationToSD(); UpdateStationPageValues(); }
+          else if (cmd == 7012) { supplyLowThresholdMl  = constrain(val, 0, 99999); SaveStationToSD(); UpdateStationPageValues(); }
+          else if (cmd == 7013) { tankEmptyFlowDropPct  = constrain(val, 1, 99);    SaveStationToSD(); UpdateStationPageValues(); }
+          else if (cmd == 7014) { tankEmptyMinRunMs      = (uint32_t)constrain(val, 1, 30) * 1000; SaveStationToSD(); UpdateStationPageValues(); }
+          else if (cmd == 7015) { nexionVolume           = constrain(val, 0, 100);  SaveStationToSD(); UpdateStationPageValues(); }
+          else if (cmd == 7020) { fillPulsesPerLiter     = (float)constrain(val, 1, 9999); SaveStationToSD(); UpdateStationPageValues(); }
+          else if (cmd == 7021) { drainPulsesPerLiter    = (float)constrain(val, 1, 9999); SaveStationToSD(); UpdateStationPageValues(); }
+          else if (cmd == ESP32_CMD_FILL_CAL_VOL)
+          {
+            int actualMl = constrain(val, 1, 10000);
+            noInterrupts(); uint32_t calPulses = fillPulses; interrupts();
+            if (actualMl > 0 && calPulses > 0)
+            {
+              fillPulsesPerLiter = (calPulses * 1000.0f) / (float)actualMl;
+              float elapsedSecs = (millis() - fillCalStartMs) / 1000.0f;
+              if (elapsedSecs > 0.5f)
+              {
+                float flowAtCalPwm = (actualMl / elapsedSecs) * 60.0f;
+                int usablePwm = CAL_PWM - MIN_PWM;
+                if (usablePwm > 0) mlPerMinPerPwm = flowAtCalPwm / (float)usablePwm;
+              }
+              SaveStationToSD();
+            }
+          }
+          else if (cmd == ESP32_CMD_DRAIN_CAL_VOL)
+          {
+            int actualMl = constrain(val, 1, 10000);
+            noInterrupts(); uint32_t calPulses = drainPulses; interrupts();
+            if (actualMl > 0 && calPulses > 0)
+            {
+              drainPulsesPerLiter = (calPulses * 1000.0f) / (float)actualMl;
+              float elapsedSecs = (millis() - drainCalStartMs) / 1000.0f;
+              if (elapsedSecs > 0.5f)
+              {
+                float flowAtCalPwm = (actualMl / elapsedSecs) * 60.0f;
+                int usablePwm = CAL_PWM - MIN_PWM;
+                if (usablePwm > 0) drainMlPerMinPerPwm = flowAtCalPwm / (float)usablePwm;
+              }
+              SaveStationToSD();
+            }
+          }
         }
-        else if (val == 6001 || val == 6002 || val == 6003 || val == 6004 || val == 6005)
+        else if (val == 6001 || val == 6002 || val == 6003 || val == 6004 || val == 6005 ||
+                 val == 7010 || val == 7012 || val == 7013 || val == 7014 || val == 7015 ||
+                 val == 7020 || val == 7021 ||
+                 val == ESP32_CMD_FILL_CAL_VOL || val == ESP32_CMD_DRAIN_CAL_VOL)
         {
           esp32PendingSetupCmd = val;
         }
@@ -3421,6 +3505,49 @@ void loop()
         else if (val == 4010) { activeModelIndex = previewModelIndex; ApplyActiveModel(); }
         else if (val == 4020) { activeModelIndex = previewModelIndex; ApplyActiveModel(); CurrentPage = MAINPAGE; NxGotoPage(PAGE_MAIN); }
         else if (val == 4030) { EnterStationPage(); }
+        else if (val == 7010) { esp32PendingSetupCmd = 7010; }
+        else if (val == 7012) { esp32PendingSetupCmd = 7012; }
+        else if (val == 7013) { esp32PendingSetupCmd = 7013; }
+        else if (val == 7014) { esp32PendingSetupCmd = 7014; }
+        else if (val == 7015) { esp32PendingSetupCmd = 7015; }
+        else if (val == 7020) { esp32PendingSetupCmd = 7020; }
+        else if (val == 7021) { esp32PendingSetupCmd = 7021; }
+        else if (val == ESP32_CMD_FILL_CAL_START)
+        {
+          if (!PumpEnabled && !drainCalActive)
+          {
+            noInterrupts(); fillPulses = 0; interrupts();
+            fillCalActive  = true;
+            fillCalStartMs = millis() + (uint32_t)((CAL_PWM - MIN_PWM) * RAMP_INTERVAL_MS);
+            PumpDriverEnable(); PumpEnabled = true;
+            currentSpeedSigned = 0;
+            digitalWrite(FILL_RELAY, HIGH); digitalWrite(DRAIN_RELAY, LOW);
+            SetTargetSpeed(+CAL_PWM);
+          }
+        }
+        else if (val == ESP32_CMD_FILL_CAL_STOP)
+        {
+          if (fillCalActive) { StopPumpInPlace(); fillCalActive = false; }
+        }
+        else if (val == ESP32_CMD_FILL_CAL_VOL) { esp32PendingSetupCmd = ESP32_CMD_FILL_CAL_VOL; }
+        else if (val == ESP32_CMD_DRAIN_CAL_START)
+        {
+          if (!PumpEnabled && !fillCalActive)
+          {
+            noInterrupts(); drainPulses = 0; interrupts();
+            drainCalActive  = true;
+            drainCalStartMs = millis() + (uint32_t)((CAL_PWM - MIN_PWM) * RAMP_INTERVAL_MS);
+            PumpDriverEnable(); PumpEnabled = true;
+            currentSpeedSigned = 0;
+            digitalWrite(FILL_RELAY, LOW); digitalWrite(DRAIN_RELAY, HIGH);
+            SetTargetSpeed(-CAL_PWM);
+          }
+        }
+        else if (val == ESP32_CMD_DRAIN_CAL_STOP)
+        {
+          if (drainCalActive) { StopPumpInPlace(); drainCalActive = false; }
+        }
+        else if (val == ESP32_CMD_DRAIN_CAL_VOL) { esp32PendingSetupCmd = ESP32_CMD_DRAIN_CAL_VOL; }
       }
       esp32Buf = "";
     }
