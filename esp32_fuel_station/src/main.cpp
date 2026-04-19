@@ -3,6 +3,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
+#include <ESPmDNS.h>
 
 // ── WiFi credentials ──────────────────────────────────────────────────────────
 #define AP_SSID     "MCP-FuelStation"
@@ -83,6 +84,10 @@ void setup()
   httpServer.onNotFound(handleNotFound);
   httpServer.begin();
   Serial.println("HTTP server started on port 80");
+
+  // mDNS — accessible as http://fuelstation.local
+  if (MDNS.begin("fuelstation"))
+    Serial.println("mDNS started: http://fuelstation.local");
 
   // WebSocket server
   wsServer.begin();
@@ -204,7 +209,7 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
     --radius: 12px;
     --radius-sm: 8px;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
   body {
     background: var(--bg);
     color: var(--text);
@@ -309,6 +314,60 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
     border-bottom: 1px solid rgba(30,58,95,0.5);
   }
   .val-row:last-child { border-bottom: none; }
+  .val-row.editable { cursor: pointer; user-select: none; -webkit-user-select: none; }
+  .val-row.editable:active { background: rgba(0,212,255,0.08); border-radius: 6px; }
+  .edit-btn {
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 80px;
+    justify-content: space-between;
+  }
+  .edit-btn:active { border-color: var(--accent); background: rgba(0,212,255,0.1); }
+  .edit-icon { color: var(--accent); font-size: 12px; }
+  .inline-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(30,58,95,0.5);
+  }
+  .inline-row:last-child { border-bottom: none; }
+  .inline-input {
+    width: 110px;
+    background: var(--panel2);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 600;
+    padding: 6px 8px;
+    text-align: right;
+    outline: none;
+  }
+  .inline-input:focus { border-color: var(--accent); box-shadow: 0 0 8px rgba(0,212,255,0.3); }
+  .sensor-toggle {
+    width: 110px;
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent);
+    background: var(--panel2);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+  }
+  .sensor-toggle.yes { background: rgba(0,230,118,0.15); color: var(--green); border-color: var(--green); }
+  .sensor-toggle.no  { background: rgba(255,61,61,0.1);  color: var(--red);   border-color: var(--red); }
   .val-label { font-size: 12px; color: var(--text2); }
   .val-value { font-size: 14px; font-weight: 600; color: var(--text); }
   .val-value.accent { color: var(--accent); }
@@ -682,17 +741,36 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
   </div>
 
   <div class="card" id="setup-params-card" style="display:none">
-    <div class="card-title">Model Parameters — <span id="setup-model-name">—</span></div>
-    <div class="val-row"><span class="val-label">Tank Volume</span><span class="val-value accent" id="setup-tank-vol">—</span></div>
-    <div class="val-row"><span class="val-label">Fill Speed</span><span class="val-value" id="setup-fill-spd">—</span></div>
-    <div class="val-row"><span class="val-label">Drain Speed</span><span class="val-value" id="setup-drain-spd">—</span></div>
-    <div class="val-row"><span class="val-label">Tank Sensor</span><span class="val-value" id="setup-sensor">—</span></div>
-    <div class="val-row"><span class="val-label">Purge Time</span><span class="val-value" id="setup-purge">—</span></div>
-    <div class="val-row"><span class="val-label">Total Fills</span><span class="val-value" id="setup-fills">—</span></div>
-    <div class="val-row"><span class="val-label">Total Drains</span><span class="val-value" id="setup-drains">—</span></div>
-    <div class="val-row"><span class="val-label">Fill Volume</span><span class="val-value" id="setup-fill-vol">—</span></div>
-    <div class="val-row"><span class="val-label">Drain Volume</span><span class="val-value" id="setup-drain-vol">—</span></div>
-    <div class="val-row"><span class="val-label">Fuel Used</span><span class="val-value green" id="setup-total-vol">—</span></div>
+    <div class="card-title">⚙ <span id="setup-model-name">—</span></div>
+
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptEdit('tankVol','Tank Volume (ml)',1,99999)" onclick="promptEdit('tankVol','Tank Volume (ml)',1,99999)">
+      <span class="val-label">Tank Volume</span>
+      <span class="val-value accent" id="setup-tank-vol">—</span>
+    </div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptEdit('fillSpd','Fill Speed (ml/min)',0,1000)" onclick="promptEdit('fillSpd','Fill Speed (ml/min)',0,1000)">
+      <span class="val-label">Fill Speed</span>
+      <span class="val-value accent" id="setup-fill-spd">—</span>
+    </div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptEdit('drainSpd','Drain Speed (ml/min)',0,1000)" onclick="promptEdit('drainSpd','Drain Speed (ml/min)',0,1000)">
+      <span class="val-label">Drain Speed</span>
+      <span class="val-value accent" id="setup-drain-spd">—</span>
+    </div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();toggleSensor()" onclick="toggleSensor()">
+      <span class="val-label">Tank Sensor</span>
+      <span class="val-value accent" id="setup-sensor">—</span>
+    </div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptEdit('purge','Overflow Purge (0-10s)',0,10)" onclick="promptEdit('purge','Overflow Purge (0-10s)',0,10)">
+      <span class="val-label">Purge Time</span>
+      <span class="val-value accent" id="setup-purge">—</span>
+    </div>
+
+    <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px">
+      <div class="val-row"><span class="val-label">Total Fills</span><span class="val-value" id="setup-fills">—</span></div>
+      <div class="val-row"><span class="val-label">Total Drains</span><span class="val-value" id="setup-drains">—</span></div>
+      <div class="val-row"><span class="val-label">Fill Volume</span><span class="val-value" id="setup-fill-vol">—</span></div>
+      <div class="val-row"><span class="val-label">Drain Volume</span><span class="val-value" id="setup-drain-vol">—</span></div>
+      <div class="val-row"><span class="val-label">Fuel Used</span><span class="val-value green" id="setup-total-vol">—</span></div>
+    </div>
   </div>
 
   <div class="btn-row">
@@ -743,6 +821,37 @@ const char INDEX_HTML[] PROGMEM = R"rawhtml(
 </div>
 
 <script>
+// ── Setup editing ─────────────────────────────────────────────────────────────
+const setup_vals = { tankVol: 0, fillSpd: 500, drainSpd: 500, sensor: 'NO', purge: 3 };
+
+function promptEdit(param, title, min, max) {
+  const current = setup_vals[param] !== undefined ? setup_vals[param] : '';
+  const result = prompt(title + '\nCurrent: ' + current, current);
+  if (result === null) return; // cancelled
+  const n = parseInt(result);
+  if (isNaN(n)) return;
+  const clamped = Math.max(min, Math.min(max, n));
+  const cmdMap = { tankVol: 6001, fillSpd: 6002, drainSpd: 6005, purge: 6004 };
+  const cmd = cmdMap[param];
+  if (cmd) {
+    sendCmd(cmd);
+    setTimeout(() => sendCmd(clamped), 150);
+    setup_vals[param] = clamped;
+    // Update display
+    const dispMap = { tankVol: 'setup-tank-vol', fillSpd: 'setup-fill-spd', drainSpd: 'setup-drain-spd', purge: 'setup-purge' };
+    const suffix  = { tankVol: 'ml', fillSpd: ' ml/m', drainSpd: ' ml/m', purge: 's' };
+    set(dispMap[param], clamped + (suffix[param] || ''));
+  }
+}
+
+function toggleSensor() {
+  const newVal = setup_vals.sensor === 'YES' ? 0 : 1;
+  sendCmd(6003);
+  setTimeout(() => sendCmd(newVal), 150);
+  setup_vals.sensor = newVal === 1 ? 'YES' : 'NO';
+  set('setup-sensor', setup_vals.sensor);
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws = null;
 let wsConnected = false;
@@ -752,6 +861,7 @@ let sliderDebounce = null;
 function connectWS() {
   const host = window.location.hostname;
   ws = new WebSocket('ws://' + host + ':81');
+  console.log('Connecting to ws://' + host + ':81');
 
   ws.onopen = () => {
     wsConnected = true;
@@ -784,15 +894,18 @@ function sendCmd(cmd) {
 }
 
 // ── Sliders ───────────────────────────────────────────────────────────────────
+let fillSliderDebounce = null;
+let drainSliderDebounce = null;
+
 function onFillSlider(val) {
   document.getElementById('fill-spd-label').textContent = val + ' ml/m';
-  clearTimeout(sliderDebounce);
-  sliderDebounce = setTimeout(() => sendCmd('1000:' + val), 200);
+  clearTimeout(fillSliderDebounce);
+  fillSliderDebounce = setTimeout(() => sendCmd('1000:' + val), 300);
 }
 function onDrainSlider(val) {
   document.getElementById('drain-spd-label').textContent = val + ' ml/m';
-  clearTimeout(sliderDebounce);
-  sliderDebounce = setTimeout(() => sendCmd('1000:' + val), 200);
+  clearTimeout(drainSliderDebounce);
+  drainSliderDebounce = setTimeout(() => sendCmd('1000:' + val), 300);
 }
 
 // ── Page navigation ───────────────────────────────────────────────────────────
@@ -939,19 +1052,27 @@ function updateUI(s) {
   if (s.modelName && currentPage === 'setup') {
     document.getElementById('setup-params-card').style.display = '';
     set('setup-model-name', s.modelName);
-    set('setup-tank-vol',   s.tankVol + 'ml');
-    set('setup-fill-spd',   s.fillSpd);
-    set('setup-drain-spd',  s.drainSpd);
-    set('setup-sensor',     s.sensor);
+    const tv = parseInt(s.tankVol) || 0;
+    const fs = parseInt(s.fillSpd) || 0;
+    const ds = parseInt(s.drainSpd) || 0;
+    setup_vals.tankVol  = tv;
+    setup_vals.fillSpd  = fs;
+    setup_vals.drainSpd = ds;
+    setup_vals.sensor   = s.sensor || 'NO';
+    set('setup-tank-vol',  tv + 'ml');
+    set('setup-fill-spd',  s.fillSpd);
+    set('setup-drain-spd', s.drainSpd);
+    set('setup-sensor',    s.sensor);
   }
   if (s.setupStats) {
     document.getElementById('setup-params-card').style.display = '';
-    set('setup-purge',      s.setupStats.purge + 's');
-    set('setup-fills',      s.setupStats.totalFills);
-    set('setup-drains',     s.setupStats.totalDrains);
-    set('setup-fill-vol',   s.setupStats.totalFillVol + 'L');
-    set('setup-drain-vol',  s.setupStats.totalDrainVol + 'L');
-    set('setup-total-vol',  s.setupStats.totalVol + 'L');
+    setup_vals.purge = s.setupStats.purge;
+    set('setup-purge',     s.setupStats.purge + 's');
+    set('setup-fills',     s.setupStats.totalFills);
+    set('setup-drains',    s.setupStats.totalDrains);
+    set('setup-fill-vol',  s.setupStats.totalFillVol + 'L');
+    set('setup-drain-vol', s.setupStats.totalDrainVol + 'L');
+    set('setup-total-vol', s.setupStats.totalVol + 'L');
   }
 
   // ── Station page ──
@@ -981,6 +1102,11 @@ function updateUI(s) {
 function set(id, val) {
   const el = document.getElementById(id);
   if (el) el.textContent = val;
+}
+
+function setInp(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.value = val;
 }
 
 function setBar(id, pct, isLow) {

@@ -426,6 +426,8 @@ static void UpdateLastActivity() { lastActivityMs = millis(); }
 
 static float   filteredPackV = 0.0f;
 static float   filteredCurrentA = 0.0f;
+static char    currentMessage[64] = "MCP Auto Fill Station";
+static char    currentMsgColor[8] = "blue";
 static bool    filterInit    = false;
 static uint8_t lowCount      = 0;
 
@@ -796,6 +798,11 @@ static void SetMessage(const char* msg, int colour)
 {
   NxSetText(NX_STOP_REASON_OBJ, msg);
   NxSetAttr("Message.pco", colour);
+  strncpy(currentMessage, msg, sizeof(currentMessage) - 1);
+  if      (colour == NX_COLOR_BLUE)  strncpy(currentMsgColor, "blue",  sizeof(currentMsgColor) - 1);
+  else if (colour == NX_COLOR_RED)   strncpy(currentMsgColor, "red",   sizeof(currentMsgColor) - 1);
+  else if (colour == NX_COLOR_GREEN_BAR) strncpy(currentMsgColor, "green", sizeof(currentMsgColor) - 1);
+  else                               strncpy(currentMsgColor, "white", sizeof(currentMsgColor) - 1);
 }
 
 static void UpdateMessageFlash()
@@ -1231,6 +1238,8 @@ static void BroadcastStateToESP32()
     "\"battType\":\"%s\","
     "\"packV\":\"%.2f\","
     "\"currentA\":\"%.1f\","
+    "\"message\":\"%s\","
+    "\"msgColor\":\"%s\","
     "\"activeModel\":%d,"
     "\"previewModel\":%d"
     "}",
@@ -1257,6 +1266,8 @@ static void BroadcastStateToESP32()
     cellCount == 3 ? "3S Battery" : cellCount == 2 ? "2S Battery" : "—",
     (double)filteredPackV,
     (double)filteredCurrentA,
+    currentMessage,
+    currentMsgColor,
     activeModelIndex,
     previewModelIndex
   );
@@ -3331,6 +3342,7 @@ void loop()
   // Read commands from ESP32
   static String esp32Buf = "";
   static bool esp32WaitingForModelIdx = false;
+  static int  esp32PendingSetupCmd = 0;
   while (ESP32_SERIAL.available())
   {
     char c = ESP32_SERIAL.read();
@@ -3339,7 +3351,10 @@ void loop()
       esp32Buf.trim();
       if (esp32Buf.startsWith("CMD:"))
       {
-        int val = esp32Buf.substring(4).toInt();
+        String cmdStr = esp32Buf.substring(4);
+        int colonIdx = cmdStr.indexOf(':');
+        int val = cmdStr.toInt();
+
         if (esp32WaitingForModelIdx)
         {
           esp32WaitingForModelIdx = false;
@@ -3348,6 +3363,53 @@ void loop()
           activeModelIndex  = idx;
           ApplyActiveModel();
           SendModelToSetupPage(idx);
+        }
+        else if (esp32PendingSetupCmd != 0)
+        {
+          // Value following a setup command (6001-6005)
+          int cmd = esp32PendingSetupCmd;
+          esp32PendingSetupCmd = 0;
+          if (cmd == 6001) { models[previewModelIndex].tankVolumeMl = constrain(val, 0, 99999); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
+          else if (cmd == 6002) { models[previewModelIndex].pumpSpeed = constrain(val, 0, 1000); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
+          else if (cmd == 6003) { models[previewModelIndex].hasTankSensor = (val == 1); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
+          else if (cmd == 6004) { models[previewModelIndex].overflowPurgeSecs = constrain(val, 0, 10); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
+          else if (cmd == 6005) { models[previewModelIndex].drainSpeed = constrain(val, 0, 1000); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
+        }
+        else if (val == 6001 || val == 6002 || val == 6003 || val == 6004 || val == 6005)
+        {
+          esp32PendingSetupCmd = val;
+        }
+        else if (val == 1000 && colonIdx >= 0)
+        {
+          // Slider speed command: CMD:1000:mlMin
+          int mlMin = cmdStr.substring(colonIdx + 1).toInt();
+          mlMin = constrain(mlMin, 0, 1000);
+          if (CurrentPage == FILLPAGE)
+          {
+            if (PumpEnabled && closedLoopActive)
+            {
+              closedLoopTargetMlMin = mlMin;
+              closedLoopIntegral    = 0.0f;
+              closedLoopPwmFloat    = (float)closedLoopCurrentPwm;
+            }
+            else if (!PumpEnabled && mlMin > 0)
+            {
+              BeginFill(mlPerMinPerPwm > 0.0f ? MlMinToPwm(mlMin) : MIN_PWM);
+            }
+          }
+          else if (CurrentPage == DRAINPAGE)
+          {
+            if (PumpEnabled && drainClosedLoopActive)
+            {
+              drainClosedLoopTargetMlMin = mlMin;
+              drainClosedLoopIntegral    = 0.0f;
+              drainClosedLoopPwmFloat    = (float)drainClosedLoopCurrentPwm;
+            }
+            else if (!PumpEnabled && mlMin > 0)
+            {
+              BeginDrain(drainMlPerMinPerPwm > 0.0f ? DrainMlMinToPwm(mlMin) : MIN_PWM);
+            }
+          }
         }
         else if (val == 8020) { esp32WaitingForModelIdx = true; }
         else if (val == 1)    { EnterFillPage(); }
