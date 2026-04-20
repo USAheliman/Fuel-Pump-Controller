@@ -1,0 +1,1 @@
+C:\Users\Mehul\.platformio\penv\Scripts\platformio.exe run --target uploadfs --environment esp32-s3-devkitc-1 --upload-port COM4

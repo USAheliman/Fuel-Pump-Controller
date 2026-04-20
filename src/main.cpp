@@ -3389,6 +3389,72 @@ void loop()
     if (c == '\n')
     {
       esp32Buf.trim();
+      if (esp32Buf.startsWith("MDLSYNC:"))
+      {
+        // Format: MDLSYNC:name,tankVol,sensor,fillSpd,drainSpd,purge,fills,drains,fillMl,drainMl
+        String data = esp32Buf.substring(8);
+        int f[9]; String name = "";
+        int comma = data.indexOf(',');
+        if (comma > 0)
+        {
+          name = data.substring(0, comma);
+          data = data.substring(comma + 1);
+          for (int i = 0; i < 9; i++)
+          {
+            comma = data.indexOf(',');
+            f[i] = (comma > 0) ? data.substring(0, comma).toInt() : data.toInt();
+            if (comma > 0) data = data.substring(comma + 1);
+          }
+          // Find or create model
+          int idx = -1;
+          for (int i = 0; i < numModels; i++)
+            if (strcmp(models[i].name, name.c_str()) == 0) { idx = i; break; }
+          if (idx < 0 && numModels < MAX_MODELS)
+          {
+            idx = numModels++;
+            memset(&models[idx], 0, sizeof(ModelConfig));
+          }
+          if (idx >= 0)
+          {
+            strncpy(models[idx].name, name.c_str(), 23);
+            models[idx].tankVolumeMl      = f[0];
+            models[idx].hasTankSensor     = f[1] == 1;
+            models[idx].pumpSpeed         = f[2];
+            models[idx].drainSpeed        = f[3];
+            models[idx].overflowPurgeSecs = f[4];
+            models[idx].totalFills        = (uint32_t)f[5];
+            models[idx].totalDrains       = (uint32_t)f[6];
+            models[idx].totalFillMl       = (uint32_t)f[7];
+            models[idx].totalDrainMl      = (uint32_t)f[8];
+            SaveOneModelToSD(idx);
+            Serial.printf("MDLSYNC: updated model %s\n", models[idx].name);
+          }
+        }
+        esp32Buf = ""; continue;
+      }
+      if (esp32Buf.startsWith("MDLDEL:"))
+      {
+        String name = esp32Buf.substring(7);
+        name.trim();
+        for (int i = 0; i < numModels; i++)
+        {
+          if (strcmp(models[i].name, name.c_str()) == 0)
+          {
+            // Remove SD config
+            char path[64];
+            snprintf(path, sizeof(path), "/models/%s/config.txt", models[i].name);
+            SD.remove(path);
+            // Shift array
+            for (int j = i; j < numModels - 1; j++) models[j] = models[j+1];
+            numModels--;
+            if (activeModelIndex >= numModels) activeModelIndex = max(0, numModels - 1);
+            SaveModelsToSD();
+            Serial.printf("MDLDEL: removed model %s\n", name.c_str());
+            break;
+          }
+        }
+        esp32Buf = ""; continue;
+      }
       if (esp32Buf.startsWith("CMD:"))
       {
         String cmdStr = esp32Buf.substring(4);

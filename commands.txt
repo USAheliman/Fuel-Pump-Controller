@@ -1,0 +1,8 @@
+Upload ESP32 filesystem:
+C:\Users\Mehul\.platformio\penv\Scripts\platformio.exe run --target uploadfs --environment esp32-s3-devkitc-1 --upload-port COM4
+
+Upload ESP32 firmware:
+Use PlatformIO sidebar - select esp32-s3-devkitc-1 environment and click Upload
+
+Upload Teensy firmware:
+Use PlatformIO sidebar - select teensy41 environment and click Upload
