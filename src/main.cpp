@@ -159,6 +159,7 @@ bool PumpEnabled = false;
 #define NX_CMD_SET_FLOW_DROP   7013
 #define NX_CMD_SET_EMPTY_DELAY 7014
 #define NX_CMD_VOLUME          7015
+#define NX_CMD_SET_CUTOFF      7016
 
 // ===============================
 // SD SYNC PROTOCOL (Nextion -> Teensy)
@@ -315,6 +316,7 @@ uint8_t drainClosedLoopSettledCount = 0;
 #define TANK_EMPTY_MIN_RUN_MS_DEFAULT 8000  // default 8s
 uint32_t tankEmptyMinRunMs = TANK_EMPTY_MIN_RUN_MS_DEFAULT;
 int      nexionVolume      = 50;   // default 50%
+float    cutoffVPerCell    = 3.82f; // low battery cutoff V per cell
 #define TANK_EMPTY_CONFIRM_COUNT    4    // consecutive low readings to confirm
 #define TANK_EMPTY_MIN_PEAK_FLOW    200  // ml/min — if peak never reaches this after min run, tank was already empty
 
@@ -875,6 +877,9 @@ static void UpdateStationPageValues()
   snprintf(buf, sizeof(buf), "%ds", (int)(tankEmptyMinRunMs / 1000));
   NxSetText(NX_ST_EMPTY_DELAY_VAL, buf);
 
+  snprintf(buf, sizeof(buf), "%.2fV", (double)cutoffVPerCell);
+  NxSetText("tBattLowVal", buf);
+
   snprintf(buf, sizeof(buf), "Volume %d%%", nexionVolume);
   NxSetText("tVolume", buf);
 
@@ -922,6 +927,20 @@ void SaveModelsToSD()
 static void SaveOneModelToSD(int idx)
 {
   if (idx < 0 || idx >= numModels) return;
+
+  // Ensure /models directory exists
+  if (!SD.exists("/models"))
+  {
+    SD.mkdir("/models");
+    Serial.println("SD: created /models directory");
+  }
+
+  // Ensure model subdirectory exists
+  char dir[48];
+  snprintf(dir, sizeof(dir), "/models/%s", models[idx].name);
+  if (!SD.exists(dir)) SD.mkdir(dir);
+
+  // Save config.txt
   char path[64];
   snprintf(path, sizeof(path), "/models/%s/config.txt", models[idx].name);
   SD.remove(path);
@@ -937,6 +956,17 @@ static void SaveOneModelToSD(int idx)
   f.print("totalFillMl=");   f.println(models[idx].totalFillMl);
   f.print("totalDrainMl=");  f.println(models[idx].totalDrainMl);
   f.close();
+
+  // Rebuild index.txt from all current models
+  SD.remove(MODELS_INDEX_FILE);
+  File fidx = SD.open(MODELS_INDEX_FILE, FILE_WRITE);
+  if (fidx)
+  {
+    for (int i = 0; i < numModels; i++)
+      fidx.println(models[i].name);
+    fidx.close();
+    Serial.printf("SD: index.txt updated with %d models\n", numModels);
+  }
 }
 
 // Parse one key=value line from config.txt
@@ -1083,6 +1113,7 @@ void SaveStationToSD()
   f.println((int)(drainMlPerMinPerPwm * 100));  // drain factor x100
   f.println((int)(tankEmptyMinRunMs / 1000));   // stored in seconds
   f.println(nexionVolume);                       // speaker volume 0-100
+  f.println((int)(cutoffVPerCell * 100));        // cutoff V per cell x100
 
   f.close();
   Serial.println("SD: station saved");
@@ -1146,6 +1177,10 @@ void LoadStationFromSD()
   line = f.readStringUntil('\n');
   int vol = line.toInt();
   if (vol >= 0) nexionVolume = constrain(vol, 0, 100);
+
+  line = f.readStringUntil('\n');
+  int cutoffX100 = line.toInt();
+  if (cutoffX100 > 0) cutoffVPerCell = constrain(cutoffX100 / 100.0f, 3.0f, 4.0f);
 
   f.close();
   Serial.println("SD: station loaded");
@@ -1359,7 +1394,7 @@ static void BroadcastStateToESP32()
       stDrainMl += models[i].totalDrainMl;
     }
     float stNet = (stFillMl > stDrainMl) ? (stFillMl - stDrainMl) / 1000.0f : 0.0f;
-    static char stJson[384];
+    static char stJson[420];
     snprintf(stJson, sizeof(stJson),
       "WS:{\"station\":{"
       "\"cap\":\"%.1fL\","
@@ -1377,6 +1412,8 @@ static void BroadcastStateToESP32()
       "\"flowDropRaw\":%d,"
       "\"emptyDelay\":\"%ds\","
       "\"emptyDelayRaw\":%d,"
+      "\"cutoff\":\"%.2fV\","
+      "\"cutoffRaw\":%d,"
       "\"totalFills\":\"%lu\","
       "\"totalDrains\":\"%lu\","
       "\"fillVol\":\"%.2fL\","
@@ -1398,6 +1435,8 @@ static void BroadcastStateToESP32()
       tankEmptyFlowDropPct,
       (int)(tankEmptyMinRunMs / 1000),
       (int)(tankEmptyMinRunMs / 1000),
+      (double)cutoffVPerCell,
+      (int)(cutoffVPerCell * 100),
       (unsigned long)stFills,
       (unsigned long)stDrains,
       stFillMl / 1000.0f,
@@ -1800,7 +1839,7 @@ void BeginOverflowPurge()
     models[activeModelIndex].totalFills++;
     models[activeModelIndex].totalFillMl += (uint32_t)lastFillVolumeMl;
     SaveOneModelToSD(activeModelIndex);
-    NxSetText(NX_STOP_REASON_OBJ, "Complete");
+    SetMessage("Complete", NX_COLOR_WHITE);
     stopReasonFlashActive = false;
     NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
     return;
@@ -1823,7 +1862,7 @@ void BeginOverflowPurge()
   targetSpeedSigned  = -purgeSpd;
   SetPumpOutput(-purgeSpd);
 
-  NxSetText(NX_STOP_REASON_OBJ, "Purging overflow line...");
+  SetMessage("Purging overflow line...", NX_COLOR_BLUE);
   stopReasonFlashActive = true;
 }
 
@@ -2127,7 +2166,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
     models[activeModelIndex].totalDrains++;
     models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
     SaveOneModelToSD(activeModelIndex);
-    NxSetText(NX_STOP_REASON_OBJ, "Stopped: Target volume reached");
+    SetMessage("Stopped: Target volume reached", NX_COLOR_WHITE);
     return;
   }
 
@@ -2156,7 +2195,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
         models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
         SaveOneModelToSD(activeModelIndex);
         autoFillTransitionMs = millis();
-        NxSetText(NX_STOP_REASON_OBJ, "Auto sequence: Tank empty - starting fill...");
+        SetMessage("Auto sequence: Tank empty - starting fill...", NX_COLOR_BLUE);
       stopReasonFlashActive = true;
       }
       else
@@ -2164,7 +2203,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
         models[activeModelIndex].totalDrains++;
         models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
         SaveOneModelToSD(activeModelIndex);
-        NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank already empty");
+        SetMessage("Stopped: Tank already empty", NX_COLOR_WHITE);
       stopReasonFlashActive = false;
       NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
         StopPumpInPlace();
@@ -2187,7 +2226,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
           models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
           SaveOneModelToSD(activeModelIndex);
           autoFillTransitionMs = millis();
-          NxSetText(NX_STOP_REASON_OBJ, "Auto sequence: Tank empty - starting fill...");
+          SetMessage("Auto sequence: Tank empty - starting fill...", NX_COLOR_BLUE);
       stopReasonFlashActive = true;
         }
         else
@@ -2195,7 +2234,7 @@ static void UpdateDrainUiAndStops(uint32_t now)
           models[activeModelIndex].totalDrains++;
           models[activeModelIndex].totalDrainMl += (uint32_t)lastDrainVolumeMl;
           SaveOneModelToSD(activeModelIndex);
-          NxSetText(NX_STOP_REASON_OBJ, "Stopped: Tank empty detected");
+          SetMessage("Stopped: Tank empty detected", NX_COLOR_WHITE);
       stopReasonFlashActive = false;
       NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
           StopPumpInPlace();
@@ -2250,7 +2289,7 @@ void UpdateFlowDisplaysAutoStopAndProgress()
           NxSetVal(NX_PROGRESS_FILL_OBJ,  0);
       NxSetText(NX_PERCENT_FILL_OBJ,  "0%");
       // Do NOT set slider here — avoids any possible echo from Nextion
-      NxSetText(NX_STOP_REASON_OBJ,   "Auto sequence: Filling...");
+      SetMessage("Auto sequence: Filling...", NX_COLOR_BLUE);
       stopReasonFlashActive = true;
       NxSetVal(NX_HELI_BAR_OBJ, 0);
       NxSetText(NX_HELI_PCT_OBJ, "0%");
@@ -2280,7 +2319,7 @@ void UpdateFlowDisplaysAutoStopAndProgress()
       models[activeModelIndex].totalFills++;
       models[activeModelIndex].totalFillMl += (uint32_t)lastFillVolumeMl;
       SaveOneModelToSD(activeModelIndex);
-      NxSetText(NX_STOP_REASON_OBJ, "Complete");
+      SetMessage("Complete", NX_COLOR_WHITE);
       stopReasonFlashActive = false;
       NxSetAttr("Message.pco", NX_COLOR_TXT_NORMAL);
     }
@@ -2348,9 +2387,9 @@ static void UpdatePowerUIAndSafety()
 
   if (!lowBatteryLatched && cellCount > 0)
   {
-    if (vPerCell_raw <= CUTOFF_V_PER_CELL)
+    if (vPerCell_raw <= cutoffVPerCell)
       { if (lowCount < 255) lowCount++; }
-    else if (vPerCell_raw >= (CUTOFF_V_PER_CELL + SAG_HYST_PER_CELL))
+    else if (vPerCell_raw >= (cutoffVPerCell + SAG_HYST_PER_CELL))
       lowCount = 0;
 
     if (lowCount >= SAG_TRIP_COUNT)
@@ -3480,11 +3519,12 @@ void loop()
           else if (cmd == 6003) { models[previewModelIndex].hasTankSensor = (val == 1); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
           else if (cmd == 6004) { models[previewModelIndex].overflowPurgeSecs = constrain(val, 0, 10); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
           else if (cmd == 6005) { models[previewModelIndex].drainSpeed = constrain(val, 0, 1000); SaveOneModelToSD(previewModelIndex); SendModelToSetupPage(previewModelIndex); }
-          else if (cmd == 7010) { supplyTankCapacityMl  = constrain(val, 0, 99999); SaveStationToSD(); UpdateStationPageValues(); }
-          else if (cmd == 7012) { supplyLowThresholdMl  = constrain(val, 0, 99999); SaveStationToSD(); UpdateStationPageValues(); }
-          else if (cmd == 7013) { tankEmptyFlowDropPct  = constrain(val, 1, 99);    SaveStationToSD(); UpdateStationPageValues(); }
-          else if (cmd == 7014) { tankEmptyMinRunMs      = (uint32_t)constrain(val, 1, 30) * 1000; SaveStationToSD(); UpdateStationPageValues(); }
-          else if (cmd == 7015) { nexionVolume           = constrain(val, 0, 100);  SaveStationToSD(); UpdateStationPageValues(); }
+          else if (cmd == 7010) { supplyTankCapacityMl  = constrain(val, 0, 99999); SaveStationToSD(); UpdateStationPageValues(); NxGotoPage(PAGE_STATION); }
+          else if (cmd == 7012) { supplyLowThresholdMl  = constrain(val, 0, 99999); SaveStationToSD(); UpdateStationPageValues(); NxGotoPage(PAGE_STATION); }
+          else if (cmd == 7013) { tankEmptyFlowDropPct  = constrain(val, 1, 99);    SaveStationToSD(); UpdateStationPageValues(); NxGotoPage(PAGE_STATION); }
+          else if (cmd == 7014) { tankEmptyMinRunMs      = (uint32_t)constrain(val, 1, 30) * 1000; SaveStationToSD(); UpdateStationPageValues(); NxGotoPage(PAGE_STATION); }
+          else if (cmd == 7015) { nexionVolume           = constrain(val, 0, 100);  SaveStationToSD(); UpdateStationPageValues(); NxGotoPage(PAGE_STATION); }
+          else if (cmd == 7016) { cutoffVPerCell = constrain(val / 100.0f, 3.0f, 4.0f); SaveStationToSD(); UpdateStationPageValues(); NxGotoPage(PAGE_STATION); }
           else if (cmd == 7020) { fillPulsesPerLiter     = (float)constrain(val, 1, 9999); SaveStationToSD(); UpdateStationPageValues(); }
           else if (cmd == 7021) { drainPulsesPerLiter    = (float)constrain(val, 1, 9999); SaveStationToSD(); UpdateStationPageValues(); }
           else if (cmd == ESP32_CMD_FILL_CAL_VOL)
@@ -3522,8 +3562,17 @@ void loop()
             }
           }
         }
+        else if (val == 7011)
+        {
+          // Reset supply tank to full
+          supplyTankRemainingMl = supplyTankCapacityMl;
+          SaveStationToSD();
+          UpdateStationPageValues();
+          NxGotoPage(PAGE_STATION);
+          Serial.println("Supply tank reset to full via phone");
+        }
         else if (val == 6001 || val == 6002 || val == 6003 || val == 6004 || val == 6005 ||
-                 val == 7010 || val == 7012 || val == 7013 || val == 7014 || val == 7015 ||
+                 val == 7010 || val == 7012 || val == 7013 || val == 7014 || val == 7015 || val == 7016 ||
                  val == 7020 || val == 7021 ||
                  val == ESP32_CMD_FILL_CAL_VOL || val == ESP32_CMD_DRAIN_CAL_VOL)
         {

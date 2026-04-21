@@ -88,9 +88,15 @@ void setup()
   delay(500);
   Serial.println("\nMCP Fuel Station ESP32 Bridge starting...");
 
-  // LittleFS
-  if (!LittleFS.begin(true))  // true = format on fail
-    Serial.println("LittleFS mount failed!");
+  // LittleFS — don't format on fail to preserve stored models
+  if (!LittleFS.begin(false))
+  {
+    Serial.println("LittleFS mount failed - trying format once");
+    if (!LittleFS.begin(true))
+      Serial.println("LittleFS format failed!");
+    else
+      Serial.println("LittleFS formatted and mounted");
+  }
   else
     Serial.println("LittleFS mounted");
 
@@ -135,6 +141,22 @@ void setup()
 
   // HTTP server
   httpServer.on("/", handleRoot);
+  // OTA update for index.html — POST new HTML to /update-html
+  httpServer.on("/update-html", HTTP_POST, [](){
+    httpServer.sendHeader("Access-Control-Allow-Origin", "*");
+    httpServer.send(200, "application/json", "{\"ok\":true}");
+  }, [](){
+    HTTPUpload& upload = httpServer.upload();
+    static File updateFile;
+    if (upload.status == UPLOAD_FILE_START) {
+      updateFile = LittleFS.open("/index.html", "w");
+      Serial.println("HTML update started");
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (updateFile) updateFile.write(upload.buf, upload.currentSize);
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (updateFile) { updateFile.close(); Serial.printf("HTML update done: %d bytes\n", upload.totalSize); }
+    }
+  });
   httpServer.on("/api/models",        HTTP_GET,    handleGetModels);
   httpServer.on("/debug/fs",          HTTP_GET,    [](){
     String out = "";

@@ -441,7 +441,6 @@
 <!-- ═══════════════════════════════════ FILL PAGE ════════════════════════════ -->
 <div id="page-fill" class="page">
   <div id="fill-message" class="msg-blue">Fill Mode</div>
-
   <div class="card">
     <div class="card-title">Fill Progress</div>
     <div class="progress-wrap">
@@ -461,10 +460,6 @@
       <div class="progress-bar">
         <div class="progress-fill orange" id="fill-flow-bar" style="width:0%"></div>
       </div>
-    </div>
-    <div class="val-row">
-      <span class="val-label">Helicopter fill</span>
-      <span class="val-value" id="fill-heli-vol">—</span>
     </div>
   </div>
 
@@ -598,27 +593,27 @@
   </div>
 
   <div class="card" id="setup-params-card" style="display:none">
-    <div class="card-title">⚙ <span id="setup-model-name">—</span></div>
+    <div class="card-title">⚙ <span id="setup-model-name">—</span> <span style="font-size:10px;color:var(--text2);font-weight:400">read only</span></div>
 
-    <div class="val-row editable" ontouchstart="event.preventDefault();promptEdit('tankVol','Tank Volume (ml)',1,99999)" onclick="promptEdit('tankVol','Tank Volume (ml)',1,99999)">
+    <div class="val-row">
       <span class="val-label">Tank Volume</span>
-      <span class="val-value accent" id="setup-tank-vol">—</span>
+      <span class="val-value" id="setup-tank-vol">—</span>
     </div>
-    <div class="val-row editable" ontouchstart="event.preventDefault();promptEdit('fillSpd','Fill Speed (ml/min)',0,1000)" onclick="promptEdit('fillSpd','Fill Speed (ml/min)',0,1000)">
+    <div class="val-row">
       <span class="val-label">Fill Speed</span>
-      <span class="val-value accent" id="setup-fill-spd">—</span>
+      <span class="val-value" id="setup-fill-spd">—</span>
     </div>
-    <div class="val-row editable" ontouchstart="event.preventDefault();promptEdit('drainSpd','Drain Speed (ml/min)',0,1000)" onclick="promptEdit('drainSpd','Drain Speed (ml/min)',0,1000)">
+    <div class="val-row">
       <span class="val-label">Drain Speed</span>
-      <span class="val-value accent" id="setup-drain-spd">—</span>
+      <span class="val-value" id="setup-drain-spd">—</span>
     </div>
-    <div class="val-row editable" ontouchstart="event.preventDefault();toggleSensor()" onclick="toggleSensor()">
+    <div class="val-row">
       <span class="val-label">Tank Sensor</span>
-      <span class="val-value accent" id="setup-sensor">—</span>
+      <span class="val-value" id="setup-sensor">—</span>
     </div>
-    <div class="val-row editable" ontouchstart="event.preventDefault();promptEdit('purge','Overflow Purge (0-10s)',0,10)" onclick="promptEdit('purge','Overflow Purge (0-10s)',0,10)">
+    <div class="val-row">
       <span class="val-label">Purge Time</span>
-      <span class="val-value accent" id="setup-purge">—</span>
+      <span class="val-value" id="setup-purge">—</span>
     </div>
 
     <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px">
@@ -713,10 +708,19 @@
       <span class="val-label">Capacity</span>
       <span class="val-value accent" id="st-cap">—</span>
     </div>
-    <div class="val-row"><span class="val-label">Remaining</span><span class="val-value green" id="st-rem">—</span></div>
+    <div class="val-row" style="display:flex;align-items:center;gap:8px">
+      <span class="val-label" style="flex:0 0 auto">Remaining</span>
+      <button type="button" class="btn btn-start" style="flex:1;padding:6px 8px;font-size:11px"
+              ontouchstart="event.preventDefault();sendCmd(7011)" onclick="sendCmd(7011)">RESET FULL</button>
+      <span class="val-value green" id="st-rem" style="flex:0 0 auto">—</span>
+    </div>
     <div class="val-row editable" ontouchstart="event.preventDefault();promptStation('low','Low Threshold (L)',0,100)" onclick="promptStation('low','Low Threshold (L)',0,100)">
       <span class="val-label">Low threshold</span>
       <span class="val-value accent" id="st-low">—</span>
+    </div>
+    <div class="val-row editable" ontouchstart="event.preventDefault();promptStation('cutoff','Battery Cutoff V/cell (3.00-4.00)',3.0,4.0,0.01)" onclick="promptStation('cutoff','Battery Cutoff V/cell (3.00-4.00)',3.0,4.0,0.01)">
+      <span class="val-label">Batt cutoff/cell</span>
+      <span class="val-value accent" id="st-cutoff">—</span>
     </div>
   </div>
 
@@ -747,6 +751,10 @@
       <span class="val-label">Empty delay</span>
       <span class="val-value accent" id="st-empty-delay">—</span>
     </div>
+  </div>
+
+  <div class="btn-row">
+    <button class="btn btn-back" onclick="userNavigated=false;sendCmd(4020)">BACK</button>
   </div>
 
   <div class="card">
@@ -787,9 +795,6 @@
     </div>
   </div>
 
-  <div class="btn-row">
-    <button class="btn btn-back" onclick="userNavigated=false;sendCmd(4020)">BACK</button>
-  </div>
 </div>
 <div id="page-lowbat" class="page">
   <div id="lowbat-icon">🔋</div>
@@ -1111,42 +1116,45 @@ function confirmDrainCal() {
 }
 
 // ── Station editing ───────────────────────────────────────────────────────────
-const station_vals = { cap: 0, low: 0, fillCal: 0, drainCal: 0, flowDrop: 0, emptyDelay: 0 };
+const station_vals = { cap: 0, low: 0, fillCal: 0, drainCal: 0, flowDrop: 0, emptyDelay: 0, cutoff: 3.82 };
 
-function promptStation(param, title, min, max) {
+function promptStation(param, title, min, max, step) {
   const current = station_vals[param] !== undefined ? station_vals[param] : '';
   const result = prompt(title + '\nCurrent: ' + current, current);
   if (result === null) return;
-  // Use parseFloat for L values
-  const n = (param === 'cap' || param === 'low') ? parseFloat(result) : parseInt(result);
+  const n = (param === 'cap' || param === 'low' || param === 'cutoff') ? parseFloat(result) : parseInt(result);
   if (isNaN(n)) return;
   const clamped = Math.max(min, Math.min(max, n));
   // Convert L to ml for cap and low before sending
-  const sendVal = (param === 'cap' || param === 'low') ? Math.round(clamped * 1000) : clamped;
+  // cutoff sent x10 as integer
+  const sendVal = (param === 'cap' || param === 'low') ? Math.round(clamped * 1000)
+                : (param === 'cutoff') ? Math.round(clamped * 100)
+                : clamped;
   const cmdMap = {
     cap:        7010,
     low:        7012,
     flowDrop:   7013,
     emptyDelay: 7014,
     fillCal:    7020,
-    drainCal:   7021
+    drainCal:   7021,
+    cutoff:     7016
   };
   const cmd = cmdMap[param];
   if (cmd) {
     sendCmd(cmd);
     setTimeout(() => sendCmd(sendVal), 150);
     station_vals[param] = clamped;
-    // Update display
     const dispMap = {
       cap:        'st-cap',
       low:        'st-low',
       flowDrop:   'st-flow-drop',
       emptyDelay: 'st-empty-delay',
       fillCal:    'st-fill-cal',
-      drainCal:   'st-drain-cal'
+      drainCal:   'st-drain-cal',
+      cutoff:     'st-cutoff'
     };
     const suffixMap = {
-      cap: 'L', low: 'L', flowDrop: '%', emptyDelay: 's', fillCal: '', drainCal: ''
+      cap: 'L', low: 'L', flowDrop: '%', emptyDelay: 's', fillCal: '', drainCal: '', cutoff: 'V'
     };
     set(dispMap[param], clamped + (suffixMap[param] || ''));
   }
@@ -1360,6 +1368,7 @@ function updateUI(s) {
       msgEl.textContent = s.message;
       msgEl.className = 'msg-' + (s.msgColor || 'white');
     }
+
   }
 
   // ── Fill page ──
@@ -1371,7 +1380,6 @@ function updateUI(s) {
     set('fill-vol-txt', s.fillVol + ' / ' + s.fillTarget + 'ml');
     setBar('fill-progress-bar', s.fillPct || 0, false);
   }
-  if (s.heliVol)  set('fill-heli-vol', s.heliVol);
   if (s.fillSpeedSlider !== undefined) {
     document.getElementById('fill-speed-slider').value = s.fillSpeedSlider;
     set('fill-spd-label', s.fillSpeedSlider + ' ml/m');
@@ -1453,6 +1461,7 @@ function updateUI(s) {
     set('st-volume',       s.station.volume);
     set('st-flow-drop',    s.station.flowDrop);
     set('st-empty-delay',  s.station.emptyDelay);
+    set('st-cutoff',       s.station.cutoff);
     set('st-total-fills',  s.station.totalFills);
     set('st-total-drains', s.station.totalDrains);
     set('st-fill-vol',     s.station.fillVol);
@@ -1465,6 +1474,7 @@ function updateUI(s) {
     station_vals.drainCal   = s.station.drainCalRaw  || parseFloat(s.station.drainCal) || 0;
     station_vals.flowDrop   = s.station.flowDropRaw  || parseInt(s.station.flowDrop)   || 0;
     station_vals.emptyDelay = s.station.emptyDelayRaw|| parseInt(s.station.emptyDelay) || 0;
+    station_vals.cutoff     = s.station.cutoffRaw    ? s.station.cutoffRaw / 100       : parseFloat(s.station.cutoff) || 3.82;
   }
 
   // ── Calibration live updates ──
